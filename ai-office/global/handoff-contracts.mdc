@@ -1,0 +1,56 @@
+---
+description: Formal handoff contracts — who may assign/receive work; single user-facing entry (Team Lead)
+globs:
+alwaysApply: true
+---
+
+# Handoff Contracts (mandatory)
+
+These contracts define **valid edges** in the workflow.
+
+**User-facing (official project work):** Only **Team Lead** is user-facing for all official project work. **Programmer**, **Tester**, and **Quant** are **internal execution roles**. They **must not** deliver final work, approval, or implementation status directly to the **user**.
+
+The **user** interacts only with **Team Lead** for official work; other roles are not user-facing.
+
+## 1. User → Team Lead (only user-facing entry)
+
+- **User assigns work only to the Team Lead (Туся):** implementation, specs, **and** requests that need Quant analysis (strategy/logs/backtests, etc.).
+- User does **not** assign tasks directly to Programmer (Пуся), Tester (Труся), or **Quant (Кася)**.
+- User receives **all final deliverables** from the Team Lead (implementation outcomes, analytics summaries, review conclusions).
+
+## 2. Team Lead → Programmer
+
+- **Only the Team Lead** assigns implementation tasks to the Programmer (from approved EPIC/Story/Task).
+- Programmer **must not** accept or act on **direct user requests** for implementation work (see `ai-office/agents/programmer/role.mdc`).
+
+## 3. Programmer → Tester
+
+- Programmer hands completed work to **Tester only** using the unified format in `ai-office/templates/programmer-handoff-template.md`.
+- Programmer does **not** hand implementation results directly to the Team Lead for “done” — only to the **Tester**; Team Lead sees the outcome **after** QA sign-off.
+
+## 4. Tester → Team Lead
+
+- Tester hands to Team Lead **only after** QA checklist passes (`ai-office/checklists/qa-checklist.md`).
+- Tester **must not** accept tasks from the **user** or **directly from Team Lead** for normal QA gating (see `ai-office/agents/tester/role.mdc` for exceptions).
+
+## 5. Team Lead ↔ Quant (Кася) — not user-facing
+
+- **Quant is not user-facing.** Quant does **not** accept direct user requests for official analysis work.
+- **Team Lead** assigns analysis tasks to Quant (scope, paths, questions) and **delivers Quant’s output to the user**.
+- Quant hands analytical results to **Team Lead** (or via agreed internal handoff), **not** to the user directly.
+- If Quant concludes that **code or repo changes** are needed, Quant notifies **Team Lead only** — not Programmer. Team Lead then runs the implementation pipeline (Programmer → Tester → Team Lead) as usual.
+
+## 6. Artifact format
+
+- All role handoffs that are not trivial one-liners **must** use templates from `ai-office/templates/` so format stays consistent.
+
+## Enforcement rule
+
+Any violation of routing, QA flow, or approval policy invalidates the task result.
+
+If a violation is detected:
+
+- the task must be restarted from Team Lead
+- previous results are considered non-compliant
+
+**Path convention:** Cross-references in this office use paths from the repository root, e.g. `ai-office/global/handoff-contracts.mdc`, `ai-office/checklists/qa-checklist.md`.

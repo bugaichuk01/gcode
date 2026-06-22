@@ -1,0 +1,39 @@
+---
+description: Security baseline — secrets, exposure, logging safety for all agents
+globs:
+alwaysApply: true
+---
+
+# Security Baseline (mandatory)
+
+All agents must respect these rules in every change.
+
+## Secrets
+
+- Never commit API keys, passwords, tokens, or private keys.
+- Use environment variables or secret managers; document in `.env.example` without real values.
+
+## Network and data exposure
+
+- Do not expose PostgreSQL, Redis, or ClickHouse to the public internet without explicit design and auth.
+- Restrict ports in Docker Compose to what is required.
+
+## API and logging
+
+- Do not log secrets, credentials, or full auth headers.
+- Add authentication where required; rate-limit sensitive endpoints when applicable.
+- Do not log **PHI or other sensitive clinical content** beyond what the task explicitly allows; prefer structured metadata (job ids, statuses) in logs.
+
+## Docker
+
+- Run containers with minimal required privileges.
+- Avoid unnecessary host volume mounts.
+
+## External integrations
+
+- Use timeouts, bounded retries, and clear error handling for outbound HTTP and message brokers.
+- Fail closed when safety or compliance requirements demand it (per Team Lead spec).
+
+## Review
+
+- For release-grade work, use `ai-office/checklists/release-checklist.md` and security items in `ai-office/checklists/review-checklist.md`.

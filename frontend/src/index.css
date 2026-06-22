@@ -1,0 +1,340 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --color-primary: 55 48 163;
+    --color-primary-hover: 67 56 202;
+    --color-accent: 153 246 228;
+    --color-surface: 255 255 255;
+    --color-muted: 248 250 252;
+    --radius-md: 0.75rem;
+    --radius-lg: 1rem;
+  }
+
+  html {
+    scroll-behavior: smooth;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    margin: 0;
+    font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background-color: theme("colors.surface-muted");
+    color: theme("colors.sage.900");
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+
+  ::selection {
+    @apply bg-forest-200 text-forest-950;
+  }
+
+  :focus-visible {
+    @apply outline-none ring-2 ring-forest-500 ring-offset-2 ring-offset-white;
+  }
+}
+
+@layer components {
+  .glass-panel {
+    @apply border border-white/60 bg-white/75 backdrop-blur-xl;
+  }
+
+  .page-container {
+    @apply mx-auto w-full max-w-[1600px] animate-fade-in px-4 py-6 sm:px-6 lg:px-8 lg:py-8;
+  }
+
+  .page-container-full {
+    @apply flex min-h-full flex-col animate-fade-in;
+  }
+
+  .card {
+    @apply rounded-2xl border border-sage-200/80 bg-white shadow-card;
+  }
+
+  .card-muted {
+    @apply rounded-2xl border border-sage-200/60;
+    background-color: color-mix(in srgb, theme("colors.surface-subtle") 80%, transparent);
+  }
+
+  .btn {
+    @apply inline-flex min-h-[44px] items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold transition-all duration-200;
+    @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-forest-500 focus-visible:ring-offset-2;
+    @apply disabled:pointer-events-none disabled:opacity-50;
+  }
+
+  .btn-primary {
+    @apply btn bg-forest-800 text-white shadow-soft hover:bg-forest-700 active:scale-[0.98];
+  }
+
+  .btn-secondary {
+    @apply btn border border-sage-200 bg-white text-sage-800 hover:border-sage-300 hover:bg-sage-50;
+  }
+
+  .btn-accent {
+    @apply btn bg-sage-600 text-white shadow-soft hover:bg-sage-700 active:scale-[0.98];
+  }
+
+  .btn-ghost {
+    @apply btn text-sage-700 hover:bg-sage-100 hover:text-sage-900;
+  }
+
+  .btn-danger {
+    @apply btn bg-red-600 text-white hover:bg-red-700 active:scale-[0.98];
+  }
+
+  .btn-sm {
+    @apply min-h-[36px] rounded-lg px-3 py-1.5 text-xs;
+  }
+
+  .btn-xs {
+    @apply min-h-[32px] rounded-lg px-2.5 py-1 text-xs font-medium;
+  }
+
+  .input-field {
+    @apply min-h-[44px] w-full rounded-xl border border-sage-200 bg-white px-3.5 py-2.5 text-sm text-sage-900;
+    @apply placeholder:text-sage-400 transition-colors duration-200;
+    @apply hover:border-sage-300 focus:border-forest-500 focus:outline-none focus:ring-2 focus:ring-forest-500/20;
+  }
+
+  .input-field-sm {
+    @apply min-h-[36px] rounded-lg px-2.5 py-1.5 text-xs;
+  }
+
+  .select-field {
+    @apply input-field cursor-pointer appearance-none bg-[length:16px] bg-[right_12px_center] bg-no-repeat pr-10;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%2364805c' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  }
+
+  .label-text {
+    @apply mb-1.5 block text-sm font-medium text-sage-700;
+  }
+
+  .label-text-xs {
+    @apply mb-1 block text-xs font-medium text-sage-600;
+  }
+
+  .badge {
+    @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold;
+  }
+
+  .badge-draft {
+    @apply badge bg-sage-100 text-sage-700;
+  }
+
+  .badge-sent {
+    @apply badge bg-amber-100 text-amber-800;
+  }
+
+  .badge-published {
+    @apply badge bg-forest-100 text-forest-700;
+  }
+
+  .badge-success {
+    @apply badge bg-emerald-100 text-emerald-800;
+  }
+
+  .badge-warning {
+    @apply badge bg-amber-100 text-amber-800;
+  }
+
+  .badge-error {
+    @apply badge bg-red-100 text-red-700;
+  }
+
+  .badge-info {
+    @apply badge bg-sky-100 text-sky-800;
+  }
+
+  .alert {
+    @apply flex items-start gap-3 rounded-xl border px-4 py-3 text-sm animate-slide-up;
+  }
+
+  .alert-error {
+    @apply alert border-red-200 bg-red-50 text-red-800;
+  }
+
+  .alert-success {
+    @apply alert border-emerald-200 bg-emerald-50 text-emerald-800;
+  }
+
+  .alert-warning {
+    @apply alert border-amber-200 bg-amber-50 text-amber-900;
+  }
+
+  .alert-info {
+    @apply alert border-sky-200 bg-sky-50 text-sky-900;
+  }
+
+  .table-container {
+    @apply overflow-hidden rounded-2xl border border-sage-200/80 bg-white shadow-soft;
+  }
+
+  .table-base {
+    @apply w-full text-sm;
+  }
+
+  .table-base thead {
+    @apply bg-gradient-to-b from-sage-50 to-sage-100/80 text-left text-sage-700;
+  }
+
+  .table-base th {
+    @apply px-4 py-3.5 text-xs font-semibold uppercase tracking-wide text-sage-600;
+  }
+
+  .table-base tbody tr {
+    @apply border-b border-sage-100 transition-colors hover:bg-sage-50/80;
+  }
+
+  .table-base td {
+    @apply px-4 py-3 text-sage-800;
+  }
+
+  .table-dense th {
+    @apply px-2 py-2 text-xs font-medium normal-case tracking-normal;
+  }
+
+  .table-dense td {
+    @apply px-2 py-2 text-xs;
+  }
+
+  .nav-link {
+    @apply flex min-h-[44px] items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-sage-600 transition-all duration-200;
+    @apply hover:bg-sage-100 hover:text-sage-900;
+  }
+
+  .nav-link-active {
+    @apply nav-link bg-forest-800 text-white shadow-soft hover:bg-forest-700 hover:text-white;
+  }
+
+  .toolbar {
+    @apply flex flex-wrap items-center gap-3 rounded-2xl border border-sage-200/60 bg-white/90 p-4 shadow-soft backdrop-blur-sm;
+  }
+
+  .toolbar-muted {
+    @apply flex flex-wrap items-center gap-3 border-b border-sage-200/80 bg-gradient-to-r from-sage-50 to-forest-50/40 px-4 py-3;
+  }
+
+  .modal-overlay {
+    @apply fixed inset-0 z-50 flex items-end justify-center bg-forest-950/40 p-4 backdrop-blur-sm sm:items-center;
+  }
+
+  .modal-panel {
+    @apply w-full max-h-[90vh] overflow-y-auto rounded-2xl border border-sage-200 bg-white p-6 shadow-glass animate-scale-in sm:max-w-lg;
+  }
+
+  .modal-panel-lg {
+    @apply modal-panel sm:max-w-2xl;
+  }
+
+  .section-title {
+    @apply text-2xl font-bold tracking-tight text-sage-900 sm:text-3xl;
+  }
+
+  .section-subtitle {
+    @apply mt-1.5 max-w-2xl text-sm leading-relaxed text-sage-600;
+  }
+
+  .checkbox-field {
+    @apply h-4 w-4 rounded border-sage-300 text-forest-700 focus:ring-forest-500/30;
+  }
+
+  .divider {
+    @apply h-px bg-gradient-to-r from-transparent via-sage-200 to-transparent;
+  }
+}
+
+@media print {
+  @page label-58x40 {
+    size: 58mm 40mm;
+    margin: 0;
+  }
+
+  @page label-43x25 {
+    size: 43mm 25mm;
+    margin: 0;
+  }
+
+  @page label-58x30 {
+    size: 58mm 30mm;
+    margin: 0;
+  }
+
+  @page {
+    size: 58mm 40mm;
+    margin: 0;
+  }
+
+  body[data-label-size="58x40"] .print-area {
+    page: label-58x40;
+  }
+
+  body[data-label-size="43x25"] .print-area {
+    page: label-43x25;
+  }
+
+  body[data-label-size="58x30"] .print-area {
+    page: label-58x30;
+  }
+
+  body * {
+    visibility: hidden !important;
+  }
+
+  .print-area,
+  .print-area * {
+    visibility: visible !important;
+  }
+
+  .print-area {
+    position: fixed !important;
+    top: 0 !important;
+    left: 0 !important;
+    margin: 0 !important;
+    padding: 2mm !important;
+    box-sizing: border-box !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    overflow: hidden !important;
+    box-shadow: none !important;
+    font-size: 6pt !important;
+    line-height: 1.2 !important;
+  }
+
+  .print-area .label-name {
+    font-size: 7pt !important;
+    font-weight: bold !important;
+  }
+
+  .print-area .label-detail {
+    font-size: 5pt !important;
+  }
+
+  body[data-label-size="58x40"] .print-area canvas {
+    width: 32mm !important;
+    height: 32mm !important;
+    max-width: none !important;
+    max-height: none !important;
+    object-fit: contain !important;
+  }
+
+  body[data-label-size="43x25"] .print-area canvas {
+    width: 20mm !important;
+    height: 20mm !important;
+    max-width: none !important;
+    max-height: none !important;
+    object-fit: contain !important;
+  }
+
+  body[data-label-size="58x30"] .print-area canvas {
+    width: 24mm !important;
+    height: 24mm !important;
+    max-width: none !important;
+    max-height: none !important;
+    object-fit: contain !important;
+  }
+}

@@ -1,0 +1,2 @@
+Alembic revision scripts live in `versions/`.
+Run migrations from the `backend` directory, for example: `alembic upgrade head`.

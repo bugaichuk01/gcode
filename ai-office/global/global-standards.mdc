@@ -1,0 +1,141 @@
+---
+description: Global engineering standards — TL-defined stack policy, intake routing, config/logging, security, EPIC/Story/Task, Definition of Done
+globs:
+alwaysApply: true
+---
+
+# Global Engineering Standards
+
+These rules apply to all agents and developers in the project office.
+
+## Intake and routing (mandatory)
+
+1. **All work that changes or interprets the product** (implementation, routed analytics, QA outcomes) is **assigned and reported through the Team Lead (Туся).** The user does not assign tasks directly to the Programmer, Tester, or Quant for official delivery.
+2. The Team Lead is the **only user-facing role** for those deliverables (`ai-office/global/handoff-contracts.mdc`).
+3. Follow `ai-office/global/handoff-contracts.mdc` for who may hand off to whom.
+
+## Execution discipline
+
+Agents must not:
+
+- skip roles in the process
+- merge or deliver results without required approvals
+- reinterpret rules for convenience
+
+If unsure:
+
+- escalate to Team Lead
+
+---
+
+## Core Principles
+
+1. Prefer simple and reliable architecture.
+2. Deliverables must be **reproducible** for their scope (scripts, services, studies — as defined in the task).
+3. No solution should depend on one developer's local environment for **what the task commits to the repo**.
+4. Every component must have a clear responsibility.
+
+---
+
+## Technology stack policy
+
+**Use the project- and task-approved stack** defined by **Team Lead** in the specification (EPIC / Story / Task). Do not assume every task uses the full list below.
+
+**Preferred stack by domain** (defaults when the task does not specify otherwise):
+
+- **Backend services:** Python 3.11+, FastAPI, Poetry; Pydantic; SQLAlchemy or asyncpg when a DB is in scope.
+- **Frontend dashboards:** React, Vite, TypeScript (when a web UI is in scope).
+- **Transactional data:** PostgreSQL when a relational DB is required.
+- **Cache / queues / locks:** Redis when those patterns are required.
+- **Analytics / large historical series:** ClickHouse when historical analytics or heavy time-series storage is required.
+- **Infra (when applicable):** Docker, Docker Compose, Linux, SSH, tmux, Nginx reverse proxy.
+
+**Narrow scopes** (examples: a single small Python utility, pure analysis or docs, config-only changes) use **only** what the Team Lead specifies — no requirement to add FastAPI, React, PostgreSQL, Docker, etc. “because global rules say so.”
+
+---
+
+## Configuration Rules
+
+When the task includes **runnable services or configurable tools**, prefer configuration via **environment variables**; document variables in **`.env.example`** (or equivalent) without secrets.
+
+When **Docker** is in the approved stack for the task, provide **Dockerfile** / **docker-compose.yml** as specified.
+
+**README.md** should explain how to run or use what the task delivers.
+
+Secrets must NEVER be committed to Git.
+
+---
+
+## Logging
+
+**Long-running services** should log: startup/shutdown, errors, external API calls where relevant, pipeline/job state changes, material domain events — to stdout/stderr unless the task specifies otherwise.
+
+**Small scripts, one-off tools, or narrow artifacts:** log or trace **as appropriate to the task**; Team Lead sets expectations in acceptance criteria.
+
+---
+
+## Project structure policy
+
+**Use only the directories and layout that apply to the task.** There is **no** universal folder set required for every deliverable.
+
+**Typical full-stack or multi-service repo** (when the Team Lead’s spec calls for it) *may* include, among others:
+
+- `backend/` or `app/`
+- `frontend/`
+- `docker/`
+- `scripts/`
+- `tests/`
+- `docs/`
+
+**Narrow or focused tasks** — a single backend service, a scripts-only change, log or metrics analysis, etc. — use a **simplified structure** appropriate to that spec (e.g. `app/` + `tests/`, or `docs/` + `tests/` only). **Team Lead** defines what belongs in scope.
+
+Root artifacts (**Dockerfile**, **docker-compose.yml**, **pyproject.toml**, **.env.example**) appear **when the spec requires them** for that deliverable.
+
+---
+
+## Agile Specification Requirement
+
+All work must be defined in:
+
+EPIC → Story → Task structure.
+
+Development cannot begin without defined tasks.
+
+---
+
+## Docker and environments
+
+When the approved stack **includes Docker**, local and deployment instructions should yield **consistent** behaviour (e.g. `docker compose up` where that is the contract).
+
+Tasks **without** containers (a local Python venv, a one-off script) follow the **runbook in the spec**, not a blanket Docker requirement.
+
+---
+
+## Security
+
+Secrets must never appear in:
+
+- Git
+- source code
+- configuration files committed to repository
+
+Use environment variables or secret managers. See `ai-office/global/security-baseline.mdc`.
+
+---
+
+## Definition of Done
+
+A task is complete when **acceptance criteria from the Team Lead’s spec** are met. Typically this includes:
+
+- Delivered artifacts match the task (code, configs, docs, analysis — as specified).
+- **README** (or equivalent) updated if behaviour or setup changed.
+- **`.env.example`** (or equivalent) updated if new configuration surface was introduced.
+- **No secrets** in the repository (`ai-office/global/security-baseline.mdc`).
+- **Logging / observability** as required by the task (services: structured logs; other scopes: per acceptance criteria).
+- **`docker compose` / tests / build** — only what the spec requires (e.g. run tests, run compose — as applicable).
+
+---
+
+## Product specs and docs
+
+Store EPIC/Story/Task specs for this product under **product roots at repository root** (e.g. **`medical-voice-ingestion/`**, **`paper-chart-ingestion/`**) or **`docs/<name>/`** as redirect/index when Team Lead defines it. Templates live in `ai-office/templates/` and `docs/templates/` (prefer `ai-office` when they differ).

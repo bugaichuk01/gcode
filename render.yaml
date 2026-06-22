@@ -1,0 +1,31 @@
+databases:
+  - name: g-code-db
+    databaseName: g-code
+    user: g-code
+
+services:
+  - type: web
+    name: g-code-api
+    runtime: docker
+    plan: free
+    dockerfilePath: docker/Dockerfile.backend
+    dockerContext: backend
+    healthCheckPath: /api/health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: g-code-db
+          property: connectionString
+      - key: CORS_ORIGINS
+        value: https://g-code-web.onrender.com,http://localhost:5173,http://127.0.0.1:5173
+
+  - type: web
+    name: g-code-web
+    runtime: static
+    rootDir: frontend
+    buildCommand: 'export VITE_API_BASE_URL="https://g-code-api.onrender.com/api/v1" && npm ci && npm run build'
+    staticPublishPath: dist
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
