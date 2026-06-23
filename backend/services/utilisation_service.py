@@ -1,7 +1,6 @@
 from __future__ import annotations
 import json
 import logging
-import re
 from datetime import datetime, timezone
 from uuid import UUID
 from sqlalchemy import select
@@ -15,35 +14,11 @@ from services.suz_integration_service import (
 )
 from services.token_service import get_active_token
 from settings import get_settings
+from utils.marking_code import normalize_marking_code
+
 logger = logging.getLogger(__name__)
-def normalize_marking_code(code: str) -> str:
-    gs = "\x1d"
-    if gs in code:
-        return code
-    pattern = re.compile(
-        r"^(01\d{14})"
-        r"(21.+?)"
-        r"(91[A-F0-9]{4})"
-        r"(92.+)$",
-        re.IGNORECASE,
-    )
-    m = pattern.match(code)
-    if m:
-        part1 = m.group(1) + m.group(2)
-        part2 = m.group(3)
-        part3 = m.group(4)
-        return f"{part1}{gs}{part2}{gs}{part3}"
-    idx_91 = code.find("91FFD0")
-    if idx_91 == -1:
-        for i in range(30, len(code) - 6):
-            if code[i : i + 2] == "91" and code[i + 6 : i + 8] == "92":
-                idx_91 = i
-                break
-    if idx_91 > 0:
-        idx_92 = code.find("92", idx_91 + 4)
-        if idx_92 > 0:
-            return f"{code[:idx_91]}{gs}{code[idx_91:idx_92]}{gs}{code[idx_92:]}"
-    return code
+
+
 def normalize_codes_for_utilisation(codes: list[str]) -> list[str]:
     return [normalize_marking_code(code) for code in codes]
 async def create_utilisation_draft(

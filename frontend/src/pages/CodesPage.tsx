@@ -10,6 +10,14 @@ import apiClient from "../api/client";
 import PageHeader from "../components/ui/PageHeader";
 import Alert from "../components/ui/Alert";
 import EmptyState from "../components/ui/EmptyState";
+import { useCisStatusCheck } from "../hooks/useCisStatusCheck";
+import { CIS_STATUS_LABELS } from "../utils/cisStatus";
+import {
+  CRYPTO_TAIL_MISSING_LABEL,
+  CRYPTO_TAIL_PRINT_ERROR,
+  filterPrintableCodes,
+  hasCryptoTail,
+} from "../utils/markingCode";
 
 interface CodeItem {
   code: string;
@@ -49,9 +57,14 @@ export default function CodesPage() {
   const [filterGtin, setFilterGtin] = useState("");
   const [page, setPage] = useState(0);
   const [selectedCodes, setSelectedCodes] = useState<Set<string>>(new Set());
-  const [checkingStatus, setCheckingStatus] = useState(false);
-  const [checkedCount, setCheckedCount] = useState(0);
-  const [statusResults, setStatusResults] = useState<Record<string, string>>({});
+  const {
+    checking: checkingStatus,
+    checkedCount,
+    statusByCode: statusResults,
+    error: statusCheckError,
+    setError: setStatusCheckError,
+    checkStatus,
+  } = useCisStatusCheck();
   const [error, setError] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
   const [importResult, setImportResult] = useState<string | null>(null);
@@ -60,6 +73,9 @@ export default function CodesPage() {
   const limit = 50;
 
   function toggleCode(code: string) {
+    if (!hasCryptoTail(code)) {
+      return;
+    }
     setSelectedCodes((prev) => {
       const next = new Set(prev);
       if (next.has(code)) next.delete(code);
@@ -69,10 +85,11 @@ export default function CodesPage() {
   }
 
   function toggleAll() {
-    if (selectedCodes.size === codes.length) {
+    const printableOnPage = codes.filter((c) => hasCryptoTail(c.code)).map((c) => c.code);
+    if (selectedCodes.size === printableOnPage.length && printableOnPage.length > 0) {
       setSelectedCodes(new Set());
     } else {
-      setSelectedCodes(new Set(codes.map((c) => c.code)));
+      setSelectedCodes(new Set(printableOnPage));
     }
   }
 
@@ -90,16 +107,28 @@ export default function CodesPage() {
       return;
     }
 
+    const { printable, rejected } = filterPrintableCodes(Array.from(selectedCodes));
+    if (printable.length === 0) {
+      setError(CRYPTO_TAIL_PRINT_ERROR);
+      return;
+    }
+    if (rejected.length > 0) {
+      setError(
+        `Исключено ${rejected.length} код(ов) без криптохвоста. ${CRYPTO_TAIL_PRINT_ERROR}`,
+      );
+    } else {
+      setError(null);
+    }
+
     const widthMm = 58;
     const heightMm = 40;
 
     try {
       setPrinting(true);
-      setError(null);
       const res = await apiClient.post(
         "/labels/pdf/batch",
         {
-          codes: Array.from(selectedCodes),
+          codes: printable,
           width_mm: widthMm,
           height_mm: heightMm,
           copies: 1,
@@ -112,8 +141,18 @@ export default function CodesPage() {
       if (win) {
         win.onload = () => win.print();
       }
-    } catch {
-      setError("Ошибка генерации этикеток");
+    } catch (err) {
+      if (axios.isAxiosError(err) && err.response?.data instanceof Blob) {
+        try {
+          const text = await err.response.data.text();
+          const json = JSON.parse(text) as { detail?: string };
+          setError(json.detail || CRYPTO_TAIL_PRINT_ERROR);
+        } catch {
+          setError(CRYPTO_TAIL_PRINT_ERROR);
+        }
+      } else {
+        setError("Ошибка генерации этикеток");
+      }
     } finally {
       setPrinting(false);
     }
@@ -155,53 +194,9 @@ export default function CodesPage() {
   }
 
   async function handleCheckStatus() {
-    const codesArr = Array.from(selectedCodes);
-    setCheckingStatus(true);
-    setCheckedCount(0);
     setError(null);
-    const allResults: Record<string, string> = {};
-
-    try {
-      for (let i = 0; i < codesArr.length; i += 50) {
-        const batch = codesArr.slice(i, i + 50);
-        const res = await apiClient.post("/emission-orders/codes/check-status", {
-          cises: batch,
-        });
-        res.data.results.forEach(
-          (item: { cis: string; status?: string; error?: string }, idx: number) => {
-            const status = item.status || item.error || "unknown";
-            const requestCode = batch[idx];
-            if (requestCode) {
-              allResults[requestCode] = status;
-            }
-            if (item.cis && item.cis !== requestCode) {
-              allResults[item.cis] = status;
-            }
-          },
-        );
-        setStatusResults({ ...allResults });
-        setCheckedCount((prev) => prev + batch.length);
-      }
-      console.log("allResults:", allResults);
-      console.log("items[0].code:", codes[0]?.code);
-      console.log("statusResults keys:", Object.keys(allResults));
-    } catch {
-      setError("Ошибка при проверке статусов");
-    } finally {
-      setCheckingStatus(false);
-    }
+    await checkStatus(Array.from(selectedCodes));
   }
-
-  const statusLabels: Record<string, { label: string; className: string }> = {
-    INTRODUCED: { label: "В обороте", className: "badge-published" },
-    APPLIED: { label: "Нанесён", className: "badge-info" },
-    EMITTED: { label: "Эмитирован", className: "badge-warning" },
-    WRITTEN_OFF: { label: "Выбыл", className: "badge-draft" },
-    RETIRED: { label: "Выбыл", className: "badge-draft" },
-    not_found: { label: "Не найден в ЧЗ", className: "badge-draft" },
-    error: { label: "Ошибка", className: "badge-error" },
-    unknown: { label: "Неизвестен", className: "badge-warning" },
-  };
 
   async function loadCodes() {
     setLoading(true);
@@ -355,10 +350,14 @@ export default function CodesPage() {
           <>
             <button
               type="button"
-              onClick={() => setSelectedCodes(new Set(codes.map((c) => c.code)))}
+              onClick={() =>
+                setSelectedCodes(
+                  new Set(codes.filter((c) => hasCryptoTail(c.code)).map((c) => c.code)),
+                )
+              }
               className="text-xs text-blue-600 hover:underline"
             >
-              Выбрать все ({codes.length})
+              Выбрать все ({codes.filter((c) => hasCryptoTail(c.code)).length})
             </button>
             {selectedCodes.size > 0 ? (
               <button
@@ -379,9 +378,16 @@ export default function CodesPage() {
         </Alert>
       ) : null}
 
-      {error ? (
-        <Alert variant="error" onDismiss={() => setError(null)} className="mb-4">
-          {error}
+      {error || statusCheckError ? (
+        <Alert
+          variant="error"
+          onDismiss={() => {
+            setError(null);
+            setStatusCheckError(null);
+          }}
+          className="mb-4"
+        >
+          {error || statusCheckError}
         </Alert>
       ) : null}
 
@@ -458,7 +464,10 @@ export default function CodesPage() {
               <th className="w-10">
                 <input
                   type="checkbox"
-                  checked={selectedCodes.size === codes.length && codes.length > 0}
+                  checked={
+                    selectedCodes.size === codes.filter((c) => hasCryptoTail(c.code)).length &&
+                    codes.filter((c) => hasCryptoTail(c.code)).length > 0
+                  }
                   onChange={toggleAll}
                   className="checkbox-field"
                 />
@@ -468,19 +477,20 @@ export default function CodesPage() {
               <th>Заказ СУЗ</th>
               <th>Дата заказа</th>
               <th>Кодов в заказе</th>
+              <th>Криптохвост</th>
               <th>Статус ЧЗ</th>
             </tr>
           </thead>
           <tbody>
             {loading ? (
               <tr>
-                <td colSpan={7} className="px-4 py-12 text-center text-sage-500">
+                <td colSpan={8} className="px-4 py-12 text-center text-sage-500">
                   Загрузка...
                 </td>
               </tr>
             ) : codes.length === 0 ? (
               <tr>
-                <td colSpan={7}>
+                <td colSpan={8}>
                   <EmptyState
                     title="Нет кодов маркировки"
                     description="Скачайте КМ из заказов СУЗ или импортируйте CSV/Excel файл."
@@ -488,14 +498,18 @@ export default function CodesPage() {
                 </td>
               </tr>
             ) : (
-              codes.map((item, idx) => (
-                <tr key={idx}>
+              codes.map((item, idx) => {
+                const printable = hasCryptoTail(item.code);
+                return (
+                <tr key={idx} className={printable ? undefined : "bg-red-50"}>
                   <td>
                     <input
                       type="checkbox"
                       checked={selectedCodes.has(item.code)}
                       onChange={() => toggleCode(item.code)}
-                      className="checkbox-field"
+                      disabled={!printable}
+                      className="checkbox-field disabled:opacity-40"
+                      title={printable ? undefined : CRYPTO_TAIL_MISSING_LABEL}
                     />
                   </td>
                   <td className="max-w-xs truncate font-mono text-xs">{item.code}</td>
@@ -506,14 +520,21 @@ export default function CodesPage() {
                   <td>{new Date(item.created_at).toLocaleDateString("ru-RU")}</td>
                   <td>{item.quantity_total}</td>
                   <td>
+                    {printable ? (
+                      <span className="badge-published">есть</span>
+                    ) : (
+                      <span className="badge-error">{CRYPTO_TAIL_MISSING_LABEL}</span>
+                    )}
+                  </td>
+                  <td>
                     {statusResults[item.code] ? (
                       <span
                         className={
-                          statusLabels[statusResults[item.code]]?.className ??
+                          CIS_STATUS_LABELS[statusResults[item.code]]?.className ??
                           "badge-draft"
                         }
                       >
-                        {statusLabels[statusResults[item.code]]?.label ??
+                        {CIS_STATUS_LABELS[statusResults[item.code]]?.label ??
                           statusResults[item.code]}
                       </span>
                     ) : (
@@ -521,7 +542,8 @@ export default function CodesPage() {
                     )}
                   </td>
                 </tr>
-              ))
+              );
+              })
             )}
           </tbody>
         </table>

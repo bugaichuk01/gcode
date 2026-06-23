@@ -1,4 +1,4 @@
-from services.utilisation_service import normalize_marking_code
+from utils.marking_code import normalize_marking_code
 def test_normalize_marking_code_inserts_gs_separator():
     test_code = (
         "01029000040676422151lSbQXAES&g691FFD092dGVzdDxPl4yc2OOhCoXj6TPcEG6lSKcn9t0Vavgj/d4="

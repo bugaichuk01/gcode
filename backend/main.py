@@ -64,7 +64,11 @@ Authorization: Bearer {access_token}
 
 
 async def create_default_templates(db) -> None:
-    """Создать шаблоны по умолчанию при первом запуске."""
+    """Создать шаблоны по умолчанию при первом запуске.
+
+    Размеры 58×40, 43×25, 80×50 должны совпадать с frontend LABEL_SIZE_PRESETS
+    (frontend/src/labels/sizePresets.ts).
+    """
     from sqlalchemy import select
 
     from models import LabelTemplate

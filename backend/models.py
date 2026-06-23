@@ -341,6 +341,8 @@ class EmissionOrder(Base):
         default=lambda: [],
     )
     release_method_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    production_order_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    payment_type: Mapped[int | None] = mapped_column(Integer, nullable=True)
     product_group: Mapped[str] = mapped_column(String(64), nullable=False, default="perfumery")
     org_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True),

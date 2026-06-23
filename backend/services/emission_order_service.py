@@ -119,6 +119,8 @@ async def create_order(
         status=EmissionOrderStatus.CREATED,
         suz_order_id=data.suz_order_id,
         release_method_type=rmt,
+        production_order_id=data.production_order_id,
+        payment_type=data.payment_type,
         product_group=_resolve_product_group(data.product_group, settings),
         org_id=org_id,
     )
@@ -376,9 +378,10 @@ async def prepare_suz_order_send_payload(
         product_group=_resolve_product_group(order.product_group, settings),
         gtin14=gtin14,
         quantity=int(order.quantity),
-        production_order_id=None,
+        production_order_id=order.production_order_id,
         release_method_type=release_method_type or stored_rmt or default_rmt,
         producer=producer,
+        payment_type=order.payment_type,
     )
     rmt = str(body.get("attributes", {}).get("releaseMethodType", default_rmt))
     products = body.get("products") or []

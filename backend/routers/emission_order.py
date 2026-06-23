@@ -60,6 +60,19 @@ async def list_emission_orders(
     db: AsyncSession = Depends(get_db_session),
 ) -> list[EmissionOrderResponse]:
     return await emission_order_service.get_orders(db, org_id=org.id if org else None)
+
+
+@router.get("/payment-type-support")
+async def payment_type_support(
+    product_group: str,
+    _: User = Depends(get_current_user),
+) -> dict:
+    """Поддерживает ли товарная группа выбор способа оплаты (paymentType)."""
+    from services.product_groups import product_group_supports_payment_type
+
+    return {"supported": product_group_supports_payment_type(product_group)}
+
+
 @router.get("/marking-codes-for-print", response_model=MarkingCodePrintOptionsResponse)
 async def list_marking_codes_for_print(
     _: User = Depends(get_current_user),

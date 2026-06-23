@@ -6,10 +6,6 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel
-from reportlab.graphics import renderPDF
-from reportlab.graphics.barcode import eanbc
-from reportlab.graphics.barcode.ecc200datamatrix import ECC200DataMatrix
-from reportlab.graphics.shapes import Drawing
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.pdfmetrics import stringWidth
@@ -20,20 +16,27 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db_session
 from dependencies import get_current_org, get_current_user
+from labels.block_registry import draw_element_from_template
+from labels.field_catalog import field_catalog_metadata
 from models import (
     GtinExtraFields,
     LabelTemplate,
     OperationLogStatus,
     OperationLogType,
     Organization,
+    ProductCard,
     User,
 )
 from schemas import LabelTemplateCreate, LabelTemplateResponse
 from services.journal_service import log_operation
+from utils.marking_code import CRYPTO_TAIL_PRINT_ERROR, codes_without_crypto_tail
 
 router = APIRouter(prefix="/labels", tags=["labels"])
 logger = logging.getLogger(__name__)
 _fonts_registered = False
+_DEFAULT_TEMPLATE_MUTATION_ERROR = (
+    "Стандартный шаблон нельзя изменить, он сохраняется как новый"
+)
 
 
 def _register_fonts():
@@ -81,67 +84,6 @@ def _extract_gtin(code: str) -> str | None:
     return m.group(1) if m else None
 
 
-def _substitute_text(
-    template: str,
-    *,
-    name: str = "",
-    article: str = "",
-    gtin: str = "",
-    size: str = "",
-    brand: str = "",
-    color: str = "",
-    price: str = "",
-) -> str:
-    return (
-        template.replace("{name}", name)
-        .replace("{article}", article)
-        .replace("{gtin}", gtin)
-        .replace("{size}", size)
-        .replace("{brand}", brand)
-        .replace("{color}", color)
-        .replace("{price}", price)
-    )
-
-
-def _gtin_to_ean13(gtin: str | None) -> str | None:
-    if not gtin:
-        return None
-    digits = re.sub(r"\D", "", gtin)
-    if len(digits) >= 13:
-        return digits[:13]
-    return None
-
-
-def _draw_ean13(
-    c: canvas.Canvas,
-    gtin: str | None,
-    x_mm: float,
-    y_mm: float,
-    width_mm: float,
-    height_mm: float,
-    page_h: float,
-) -> None:
-    barcode_value = _gtin_to_ean13(gtin)
-    if not barcode_value:
-        return
-
-    bar_height = height_mm * mm
-    bar_width = width_mm * mm
-    text_gap = 5 * mm
-    draw_y = page_h - y_mm * mm - bar_height - text_gap
-
-    try:
-        barcode = eanbc.Ean13BarcodeWidget(barcode_value)
-        barcode.barHeight = bar_height
-        barcode.barWidth = max(bar_width / 95.0, 0.2 * mm)
-
-        drawing = Drawing(bar_width, bar_height + text_gap)
-        drawing.add(barcode)
-        renderPDF.draw(drawing, c, x_mm * mm, draw_y)
-    except Exception as e:
-        logger.warning("Ошибка генерации EAN-13: %s", e)
-
-
 def _truncate_text(
     c: canvas.Canvas,
     text: str,
@@ -162,57 +104,9 @@ def _draw_datamatrix_safe(
     size: float,
 ) -> None:
     """Надёжный рендер ECC200DataMatrix. x, y, size — в единицах ReportLab (points)."""
-    try:
-        probe = ECC200DataMatrix(value=code, barWidth=1.0)
-        probe.validate()
-        probe.encode()
-        cols = probe.col_modules
-        rows = probe.row_modules
+    from labels.block_registry import draw_datamatrix_safe
 
-        if cols <= 0 or rows <= 0:
-            raise ValueError(f"Неверные размеры матрицы: {cols}x{rows}")
-
-        bar_size = size / max(cols, rows)
-
-        dm = ECC200DataMatrix(value=code, barWidth=bar_size)
-        dm.validate()
-        dm.encode()
-        dm.canv = c
-        dm.x = 0
-        dm.y = 0
-
-        c.saveState()
-        c.translate(x, y)
-        dm.draw()
-        c.restoreState()
-
-    except Exception as e:
-        c.saveState()
-        c.setStrokeColorRGB(1, 0, 0)
-        c.setLineWidth(0.5)
-        c.rect(x, y, size, size)
-        c.setFont("Helvetica", 3)
-        c.setFillColorRGB(1, 0, 0)
-        c.drawString(x + 1, y + size / 2, "DM ERR")
-        c.restoreState()
-        logger.warning("DataMatrix рендер не удался: %s, код: %s...", e, code[:20])
-
-
-def _draw_datamatrix(
-    c: canvas.Canvas,
-    code: str,
-    x_mm: float,
-    y_mm: float,
-    size_mm: float,
-    page_h: float,
-) -> None:
-    """Рисует DataMatrix с координатами в мм от верхнего левого угла."""
-    size = size_mm * mm
-    x = x_mm * mm
-    y = page_h - y_mm * mm - size
-    if y < 0:
-        y = 0
-    _draw_datamatrix_safe(c, code, x, y, size)
+    draw_datamatrix_safe(c, code, x, y, size)
 
 
 def _draw_label_default(
@@ -267,65 +161,17 @@ def _draw_label_from_template(
     code: str,
     gtin: str | None,
     ef: GtinExtraFields | None,
+    product_card: ProductCard | None,
     layout_data: dict,
     page_h: float,
     font_normal: str,
     font_bold: str,
 ) -> None:
-    fields = {
-        "name": ef.name if ef and ef.name else "",
-        "article": ef.article if ef and ef.article else "",
-        "gtin": gtin or "",
-        "size": ef.size if ef and ef.size else "",
-        "brand": ef.brand if ef and ef.brand else "",
-        "color": ef.color if ef and ef.color else "",
-        "price": "",
-    }
     elements = layout_data.get("elements") or []
     for el in elements:
-        el_type = el.get("type")
-        if el_type == "datamatrix":
-            _draw_datamatrix(
-                c,
-                code,
-                float(el.get("x", 0)),
-                float(el.get("y", 0)),
-                float(el.get("size", 30)),
-                page_h,
-            )
-        elif el_type == "barcode_ean13":
-            _draw_ean13(
-                c,
-                gtin,
-                float(el.get("x", 0)),
-                float(el.get("y", 0)),
-                float(el.get("width", 38)),
-                float(el.get("height", 15)),
-                page_h,
-            )
-        elif el_type == "text":
-            text = _substitute_text(el.get("text", ""), **fields)
-            if not text.strip():
-                continue
-            font_size = float(el.get("font_size", 6))
-            is_bold = bool(el.get("bold"))
-            font_name = font_bold if is_bold else font_normal
-            c.setFont(font_name, font_size)
-            x = float(el.get("x", 0)) * mm
-            y = page_h - float(el.get("y", 0)) * mm - font_size * 0.35 * mm
-            max_width = el.get("max_width")
-            if max_width:
-                max_w = float(max_width) * mm
-                while stringWidth(text, font_name, font_size) > max_w and len(text) > 1:
-                    text = text[:-1]
-            c.drawString(x, y, text)
-        elif el_type == "line":
-            x1 = float(el.get("x1", el.get("x", 0))) * mm
-            y1 = page_h - float(el.get("y1", el.get("y", 0))) * mm
-            x2 = float(el.get("x2", 0)) * mm
-            y2 = page_h - float(el.get("y2", el.get("y", 0))) * mm
-            c.setLineWidth(0.5)
-            c.line(x1, y1, x2, y2)
+        draw_element_from_template(
+            c, el, code, gtin, ef, page_h, font_normal, font_bold, product_card
+        )
 
 
 async def _generate_batch_labels_pdf(
@@ -337,6 +183,7 @@ async def _generate_batch_labels_pdf(
     _register_fonts()
     if not data.codes:
         raise HTTPException(status_code=400, detail="Список кодов пуст")
+    _reject_codes_without_crypto_tail(data.codes)
     if len(data.codes) > 500:
         raise HTTPException(status_code=400, detail="Максимум 500 этикеток за один запрос")
     if data.copies < 1 or data.copies > 10:
@@ -350,6 +197,7 @@ async def _generate_batch_labels_pdf(
     font_bold = "DejaVuBold" if _fonts_registered else "Helvetica-Bold"
 
     extra_fields_cache: dict[str, GtinExtraFields] = {}
+    product_card_cache: dict[str, ProductCard] = {}
     gtins = list({_extract_gtin(code) for code in data.codes if _extract_gtin(code)})
     if gtins:
         q = select(GtinExtraFields).where(GtinExtraFields.gtin.in_(gtins))
@@ -359,10 +207,21 @@ async def _generate_batch_labels_pdf(
         for ef in result.scalars().all():
             extra_fields_cache[ef.gtin] = ef
 
+        q_pc = select(ProductCard).where(ProductCard.gtin.in_(gtins))
+        if org:
+            q_pc = q_pc.where(ProductCard.org_id == org.id)
+        result_pc = await db.execute(q_pc)
+        for pc in result_pc.scalars().all():
+            if pc.gtin:
+                product_card_cache[pc.gtin] = pc
+
     def draw_label(code: str, gtin: str | None) -> None:
         ef = extra_fields_cache.get(gtin) if gtin else None
+        product_card = product_card_cache.get(gtin) if gtin else None
         if layout_data and layout_data.get("elements"):
-            _draw_label_from_template(c, code, gtin, ef, layout_data, h, font_normal, font_bold)
+            _draw_label_from_template(
+                c, code, gtin, ef, product_card, layout_data, h, font_normal, font_bold
+            )
         else:
             _draw_label_default(c, code, gtin, ef, w, h, font_normal, font_bold)
 
@@ -393,6 +252,20 @@ async def _generate_batch_labels_pdf(
         media_type="application/pdf",
         headers={"Content-Disposition": f"inline; filename={filename}"},
     )
+
+
+def _reject_codes_without_crypto_tail(codes: list[str]) -> None:
+    invalid = codes_without_crypto_tail(codes)
+    if invalid:
+        raise HTTPException(status_code=400, detail=CRYPTO_TAIL_PRINT_ERROR)
+
+
+@router.get("/field-catalog")
+async def get_field_catalog(
+    _: User = Depends(get_current_user),
+) -> list[dict[str, str]]:
+    """Каталог полей (плейсхолдеров) для конструктора этикеток."""
+    return field_catalog_metadata()
 
 
 @router.get("/templates", response_model=list[LabelTemplateResponse])
@@ -449,11 +322,12 @@ async def update_template(
     template = await db.get(LabelTemplate, template_id)
     if not template:
         raise HTTPException(404, "Шаблон не найден")
+    if template.is_default:
+        raise HTTPException(409, _DEFAULT_TEMPLATE_MUTATION_ERROR)
     template.name = data.name
     template.width_mm = data.width_mm
     template.height_mm = data.height_mm
     template.layout_data = data.layout_data
-    template.is_default = data.is_default
     await db.commit()
     await db.refresh(template)
     return template
@@ -469,6 +343,8 @@ async def delete_template(
     template = await db.get(LabelTemplate, template_id)
     if not template:
         raise HTTPException(404, "Шаблон не найден")
+    if template.is_default:
+        raise HTTPException(409, "Стандартный шаблон нельзя удалить")
     await db.delete(template)
     await db.commit()
 

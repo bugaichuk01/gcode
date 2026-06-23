@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import apiClient from "../api/client";
+import { hasCryptoTail } from "../utils/markingCode";
 import PageHeader from "../components/ui/PageHeader";
 import Alert from "../components/ui/Alert";
 import { signBody } from "../services/signingService";
@@ -72,10 +73,10 @@ export default function UtilisationPage() {
       return;
     }
 
-    const invalidCodes = codes.filter((c) => c.length < 50);
+    const invalidCodes = codes.filter((c) => !hasCryptoTail(c));
     if (invalidCodes.length > 0) {
       setError(
-        `Обнаружены некорректные коды (слишком короткие): ${invalidCodes.slice(0, 3).join(", ")}. ` +
+        `Обнаружены некорректные коды (без криптохвоста): ${invalidCodes.slice(0, 3).join(", ")}. ` +
           "Используйте полные коды маркировки из раздела 'Коды маркировки'.",
       );
       return;

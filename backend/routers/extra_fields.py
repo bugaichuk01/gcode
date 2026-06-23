@@ -15,6 +15,34 @@ from schemas import (
 router = APIRouter(prefix="/extra-fields", tags=["extra-fields"])
 
 
+def _merge_extra_json(
+    existing: dict | None,
+    incoming: dict | None,
+) -> dict | None:
+    if incoming is None:
+        return existing
+    merged = dict(existing or {})
+    for key, value in incoming.items():
+        if value is None or (isinstance(value, str) and not value.strip()):
+            merged.pop(key, None)
+        else:
+            merged[key] = value
+    return merged or None
+
+
+def _apply_extra_fields_upsert(
+    record: GtinExtraFields,
+    data: GtinExtraFieldsCreate,
+) -> None:
+    payload = data.model_dump(exclude={"gtin"})
+    incoming_extra = payload.pop("extra", None)
+    for key, value in payload.items():
+        if value is not None:
+            setattr(record, key, value)
+    if incoming_extra is not None:
+        record.extra = _merge_extra_json(record.extra, incoming_extra)
+
+
 @router.get("/", response_model=GtinExtraFieldsListResponse)
 async def list_extra_fields(
     gtin: str | None = None,
@@ -43,9 +71,7 @@ async def create_or_update_extra_fields(
         select(GtinExtraFields).where(GtinExtraFields.gtin == data.gtin)
     )
     if existing:
-        for key, value in data.model_dump(exclude={"gtin"}).items():
-            if value is not None:
-                setattr(existing, key, value)
+        _apply_extra_fields_upsert(existing, data)
         await db.commit()
         await db.refresh(existing)
         return existing
@@ -74,8 +100,12 @@ async def update_extra_fields(
             status.HTTP_404_NOT_FOUND,
             detail="Доп. поля для GTIN не найдены",
         )
-    for key, value in data.model_dump(exclude_none=True).items():
+    payload = data.model_dump(exclude_none=True)
+    incoming_extra = payload.pop("extra", None)
+    for key, value in payload.items():
         setattr(record, key, value)
+    if incoming_extra is not None:
+        record.extra = _merge_extra_json(record.extra, incoming_extra)
     await db.commit()
     await db.refresh(record)
     return record

@@ -10,6 +10,7 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 from settings import Settings, get_settings
 from services.product_groups import normalize_suz_product_group, resolve_suz_template_id
+from utils.marking_code import get_short_cis
 logger = logging.getLogger(__name__)
 class SuzIntegrationError(RuntimeError):
     def __init__(self, message: str, *, suggest_transport_diagnostics: bool = False) -> None:
@@ -595,8 +596,8 @@ async def _suz_dispatch_httpx(
             continue
     return None, last_err
 _PERFUMERY_GROUP_ALIASES = frozenset({"perfum", "perfumery", "perfume"})
-_RELEASE_METHOD_LOCAL = ("PRODUCED_IN_RF", "IMPORT", "REMARK", "REMAINS", "COMMISSION")
-_RELEASE_METHOD_GLOBAL = ("IMPORT", "REMARK", "REMAINS", "COMMISSION")
+_RELEASE_METHOD_LOCAL = ("PRODUCTION", "IMPORT", "REMARK", "REMAINS", "COMMISSION", "REAPPLY")
+_RELEASE_METHOD_GLOBAL = ("IMPORT", "REMARK", "REMAINS", "COMMISSION", "REAPPLY")
 def resolve_suz_api_product_group(product_group: str | None) -> str:
     g = normalize_suz_product_group(product_group)
     if not g:
@@ -608,19 +609,14 @@ def resolve_suz_api_product_group(product_group: str | None) -> str:
     return g
 def release_method_options_for_gtin(gtin14: str) -> tuple[str, list[str]]:
     if gtin14.startswith("029"):
-        return "REMARK", ["REMARK"]
+        return "REMARK", ["REMARK", "REMAINS"]
     if gtin14.startswith("046") or gtin14.startswith("004"):
-        return "REMARK", list(_RELEASE_METHOD_LOCAL)
+        return "PRODUCTION", list(_RELEASE_METHOD_LOCAL)
     return "IMPORT", list(_RELEASE_METHOD_GLOBAL)
-_FORM_RELEASE_METHOD_ALIASES: dict[str, str] = {
-    "PRODUCTION": "PRODUCED_IN_RF",
-    "REAPPLY": "REMAINS",
-}
 
 
 def _normalize_release_method_type(raw: str | None, *, default: str, allowed: list[str]) -> str:
     rmt = (raw or "").strip().upper()
-    rmt = _FORM_RELEASE_METHOD_ALIASES.get(rmt, rmt)
     if rmt not in allowed:
         return default
     return rmt
@@ -635,8 +631,8 @@ def build_suz_create_order_body(
     production_order_id: str | None = None,
     release_method_type: str | None = None,
     producer: str | None = None,
+    payment_type: int | None = None,
 ) -> dict[str, Any]:
-    _ = production_order_id
     api_group = resolve_suz_api_product_group(product_group)
     default_rmt, allowed = release_method_options_for_gtin(gtin14)
     fallback = (
@@ -678,6 +674,16 @@ def build_suz_create_order_body(
     }
     if contact_person:
         attributes["contactPerson"] = contact_person
+
+    poid = (production_order_id or "").strip()
+    if poid:
+        attributes["productionOrderId"] = poid
+
+    from services.product_groups import product_group_supports_payment_type
+
+    if payment_type in (1, 2) and product_group_supports_payment_type(api_group):
+        attributes["paymentType"] = int(payment_type)
+
     prod_inn = (producer or "").strip()
     if rmt == "REMARK" and prod_inn:
         line["attributes"] = {"producer": prod_inn}
@@ -1136,14 +1142,6 @@ async def check_cis_status(
         "status": "error",
         "error": response.text[:200],
     }
-def _get_short_cis(code: str) -> str:
-    gs = "\x1d"
-    if gs in code:
-        return code.split(gs)[0]
-    idx = code.find("91FFD0")
-    if idx > 0:
-        return code[:idx]
-    return code
 async def check_cis_statuses_batch(
     cises: list[str],
     db: AsyncSession | None = None,
@@ -1229,7 +1227,7 @@ async def check_cis_statuses_batch(
             if results:
                 all_not_found = all(r.get("status") == "not_found" for r in results)
                 if all_not_found:
-                    short_cises = [_get_short_cis(c) for c in cises]
+                    short_cises = [get_short_cis(c) for c in cises]
                     if short_cises != cises:
                         body2 = json_lib.dumps(short_cises, ensure_ascii=True)
                         logger.info(

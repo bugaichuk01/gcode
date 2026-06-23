@@ -1,12 +1,13 @@
 const RELEASE_METHOD_LOCAL = [
-  "PRODUCED_IN_RF",
+  "PRODUCTION",
   "IMPORT",
   "REMARK",
   "REMAINS",
   "COMMISSION",
+  "REAPPLY",
 ] as const;
 
-const RELEASE_METHOD_GLOBAL = ["IMPORT", "REMARK", "REMAINS", "COMMISSION"] as const;
+const RELEASE_METHOD_GLOBAL = ["IMPORT", "REMARK", "REMAINS", "COMMISSION", "REAPPLY"] as const;
 
 export type ReleaseMethodType =
   | (typeof RELEASE_METHOD_LOCAL)[number]
@@ -24,10 +25,10 @@ export function releaseMethodOptionsForGtin(gtin14: string): {
   allowed: ReleaseMethodType[];
 } {
   if (gtin14.startsWith("029")) {
-    return { defaultMethod: "REMARK", allowed: ["REMARK"] };
+    return { defaultMethod: "REMARK", allowed: ["REMARK", "REMAINS"] };
   }
   if (gtin14.startsWith("046") || gtin14.startsWith("004")) {
-    return { defaultMethod: "REMARK", allowed: [...RELEASE_METHOD_LOCAL] };
+    return { defaultMethod: "PRODUCTION", allowed: [...RELEASE_METHOD_LOCAL] };
   }
   return { defaultMethod: "IMPORT", allowed: [...RELEASE_METHOD_GLOBAL] };
 }
@@ -41,9 +42,10 @@ export function validateGtin14(gtin: string): string | null {
 }
 
 export const RELEASE_METHOD_LABELS: Record<string, string> = {
+  PRODUCTION: "Произведён в РФ",
+  IMPORT: "Ввезён в РФ",
+  REMAINS: "Маркировка остатков",
   REMARK: "Перемаркировка",
-  IMPORT: "Импорт",
-  PRODUCED_IN_RF: "Произведено в РФ",
-  REMAINS: "Остатки",
-  COMMISSION: "Комиссия",
+  COMMISSION: "Принят на комиссию от физлица",
+  REAPPLY: "Маркировка вне производства",
 };

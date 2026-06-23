@@ -14,6 +14,7 @@ import {
 import { closeEmissionOrder, sendLocalOrderToSuz } from "../services/suzOrderApi";
 import { RELEASE_METHOD_LABELS } from "../services/suzGtinRules";
 import { useProductGroups } from "../hooks/useProductGroups";
+import { TNVED_GROUPS } from "../data/tnvedGroups";
 
 type EmissionOrderStatus =
   | "created"
@@ -39,10 +40,31 @@ function getOrderError(order: EmissionOrder): string | null {
   return order.suz_error || "Заказ отклонён СУЗ";
 }
 
+type SetItemOption = { gtin: string; quantity: number };
+
 type ProductCardOption = {
   id: string;
   name: string;
+  gtin: string | null;
+  type: string;
+  tn_ved: string;
+  set_items: SetItemOption[];
 };
+
+interface OrderRow {
+  cardId: string;
+  cardName: string;
+  gtin: string;
+  quantity: number;
+  productGroup: string;
+  releaseMethodType: string;
+  productionOrderId: string;
+  paymentType: number | null;
+  _status?: "draft" | "sending" | "sent" | "error";
+  _error?: string;
+  _suzOrderId?: string;
+  _isSetUnit?: boolean;
+}
 
 type SuzSyncResult = {
   inserted: number;
@@ -93,10 +115,12 @@ const statusColor: Record<string, string> = {
 };
 
 const RELEASE_METHOD_TYPES = [
-  { value: "PRODUCTION", label: "Производство (стандарт)" },
+  { value: "PRODUCTION", label: "Произведён в РФ" },
+  { value: "IMPORT", label: "Ввезён в РФ" },
   { value: "REMAINS", label: "Маркировка остатков" },
-  { value: "REMARK", label: "Перемаркировка (замена повреждённых)" },
-  { value: "REAPPLY", label: "Нанесение вне производства" },
+  { value: "REMARK", label: "Перемаркировка" },
+  { value: "COMMISSION", label: "Принят на комиссию от физлица" },
+  { value: "REAPPLY", label: "Маркировка вне производства" },
 ];
 
 export default function OrdersPage() {
@@ -115,7 +139,16 @@ export default function OrdersPage() {
   const [quantity, setQuantity] = useState("1");
   const [orderGtin, setOrderGtin] = useState("");
   const [releaseMethodType, setReleaseMethodType] = useState("PRODUCTION");
+  const [productionOrderId, setProductionOrderId] = useState("");
   const [productGroup, setProductGroup] = useState("perfumery");
+  const [paymentType, setPaymentType] = useState<number | null>(null);
+  const [paymentSupported, setPaymentSupported] = useState(false);
+  const [orderRows, setOrderRows] = useState<OrderRow[]>([]);
+  const [, setSelectedRowIdx] = useState<Set<number>>(new Set());
+  const [editingOrderCell, setEditingOrderCell] = useState<{
+    rowIdx: number;
+    field: string;
+  } | null>(null);
   const [gtinPatchOrderId, setGtinPatchOrderId] = useState<string | null>(null);
   const [gtinPatchValue, setGtinPatchValue] = useState("");
   const [isPatchingGtin, setIsPatchingGtin] = useState(false);
@@ -141,6 +174,10 @@ export default function OrdersPage() {
     );
     return selectedOrderIds.filter((id) => createdWithCard.has(id));
   }, [orders, selectedOrderIds]);
+
+  const selectedCard = cards.find((c) => c.id === selectedCardId);
+  const isSelectedBundle = selectedCard?.type === "bundle";
+  const bundleHasItems = (selectedCard?.set_items?.length ?? 0) > 0;
 
   const singleSelectedDraftForSuz = useMemo(() => {
     if (selectedOrderIds.length !== 1) {
@@ -174,14 +211,33 @@ export default function OrdersPage() {
   async function loadCards() {
     try {
       const response = await apiClient.get<
-        ProductCardOption[] | { items: ProductCardOption[] }
+        Array<Record<string, unknown>> | { items: Array<Record<string, unknown>> }
       >("/product-cards/", { params: { limit: 1000, offset: 0 } });
       const raw = response.data;
       const list = Array.isArray(raw) ? raw : (raw.items ?? []);
-      const options = list.map((card) => ({ id: card.id, name: card.name }));
+      const options = list.map((card) => ({
+        id: String(card.id),
+        name: String(card.name ?? ""),
+        gtin: (card.gtin as string | null | undefined) ?? null,
+        type: (card.type as string | undefined) ?? "unit",
+        tn_ved: (card.tn_ved as string | undefined) ?? "",
+        set_items: Array.isArray(card.set_items)
+          ? card.set_items.map((it: { gtin?: unknown; quantity?: unknown }) => ({
+              gtin: String(it.gtin ?? ""),
+              quantity: Number(it.quantity ?? 1),
+            }))
+          : [],
+      }));
       setCards(options);
       if (options.length > 0 && !selectedCardId) {
-        setSelectedCardId(options[0].id);
+        const first = options[0];
+        setSelectedCardId(first.id);
+        if (first.gtin) setOrderGtin(first.gtin);
+        if (first.tn_ved) {
+          const prefix = first.tn_ved.replace(/\D/g, "").slice(0, 4);
+          const match = TNVED_GROUPS.find((g) => g.code === prefix);
+          if (match) setProductGroup(match.productGroup);
+        }
       }
     } catch (requestError) {
       console.error("Failed to load product cards for order form:", requestError);
@@ -214,6 +270,22 @@ export default function OrdersPage() {
   useEffect(() => {
     setSelectedOrderIds((previous) => previous.filter((id) => orders.some((order) => order.id === id)));
   }, [orders]);
+
+  useEffect(() => {
+    if (!productGroup) {
+      setPaymentSupported(false);
+      return;
+    }
+    apiClient
+      .get<{ supported: boolean }>("/emission-orders/payment-type-support", {
+        params: { product_group: productGroup },
+      })
+      .then((res) => {
+        setPaymentSupported(res.data.supported);
+        setPaymentType(res.data.supported ? 2 : null);
+      })
+      .catch(() => setPaymentSupported(false));
+  }, [productGroup]);
 
   async function handleSyncFromSuz() {
     setIsSyncing(true);
@@ -361,42 +433,250 @@ export default function OrdersPage() {
     }
   }
 
-  async function handleCreateOrder(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const parsedQuantity = Number(quantity);
-    if (!selectedCardId || Number.isNaN(parsedQuantity) || parsedQuantity <= 0) {
-      setError("Выберите карточку и укажите количество больше 0.");
+  function handleSelectCard(cardId: string) {
+    setSelectedCardId(cardId);
+    const card = cards.find((c) => c.id === cardId);
+    if (!card) return;
+
+    if (card.gtin) {
+      setOrderGtin(card.gtin);
+    }
+
+    if (card.tn_ved) {
+      const prefix = card.tn_ved.replace(/\D/g, "").slice(0, 4);
+      const match = TNVED_GROUPS.find((g) => g.code === prefix);
+      if (match && productGroups.some((pg) => pg.value === match.productGroup)) {
+        setProductGroup(match.productGroup);
+      }
+    }
+  }
+
+  function handleAddOrderRow() {
+    const qty = Number(quantity);
+    if (!selectedCardId || Number.isNaN(qty) || qty <= 0) {
+      setError("Выберите карточку и укажите количество больше 0");
+      return;
+    }
+    const card = cards.find((c) => c.id === selectedCardId);
+    const effectiveGtin = orderGtin.trim() || card?.gtin || "";
+
+    const isTech = card?.gtin?.startsWith("029") || card?.type === "tech_card";
+    if (!effectiveGtin && !isTech) {
+      setError("Укажите GTIN (карточка без GTIN). Заполните поле GTIN.");
       return;
     }
 
+    const row: OrderRow = {
+      cardId: selectedCardId,
+      cardName: card?.name || "—",
+      gtin: effectiveGtin,
+      quantity: qty,
+      productGroup,
+      releaseMethodType,
+      productionOrderId: productionOrderId.trim(),
+      paymentType: paymentSupported ? paymentType : null,
+      _status: "draft",
+    };
+    setOrderRows((prev) => [...prev, row]);
+    setError(null);
+    setSyncInfo(`Добавлено позиций в заказ: ${orderRows.length + 1}`);
+
+    setQuantity("1");
+    setOrderGtin("");
+    setProductionOrderId("");
+  }
+
+  function handleAddSetUnits() {
+    const card = cards.find((c) => c.id === selectedCardId);
+    if (!card) {
+      setError("Выберите карточку набора");
+      return;
+    }
+    if (card.type !== "bundle") {
+      setError("Выбранная карточка не является набором");
+      return;
+    }
+    if (!card.set_items || card.set_items.length === 0) {
+      setError(
+        "У набора не указан состав. Сначала добавьте вложения в карточку набора в Национальном каталоге.",
+      );
+      return;
+    }
+
+    const setQty = Number(quantity) || 1;
+
+    const unitRows: OrderRow[] = card.set_items
+      .filter((it) => it.gtin)
+      .map((it) => ({
+        cardId: selectedCardId,
+        cardName: `${card.name} → вложение ${it.gtin}`,
+        gtin: it.gtin,
+        quantity: setQty * it.quantity,
+        productGroup,
+        releaseMethodType,
+        productionOrderId: productionOrderId.trim(),
+        paymentType: paymentSupported ? paymentType : null,
+        _status: "draft",
+        _isSetUnit: true,
+      }));
+
+    if (unitRows.length === 0) {
+      setError("В составе набора нет валидных GTIN вложений");
+      return;
+    }
+
+    setOrderRows((prev) => [...prev, ...unitRows]);
+    setError(null);
+    setSyncInfo(
+      `Добавлено единиц набора: ${unitRows.length} (количество рассчитано из состава карточки НК)`,
+    );
+    setQuantity("1");
+  }
+
+  async function handleCreateAllOrders() {
+    if (orderRows.length === 0) {
+      setError("Список пуст. Добавьте позиции через «Добавить в заказ»");
+      return;
+    }
+    if (orderRows.length > 100) {
+      setError("Максимум 100 заказов за раз (лимит СУЗ)");
+      return;
+    }
     setIsSubmitting(true);
     setError(null);
-    try {
-      const payload: Record<string, unknown> = {
-        product_card_id: selectedCardId,
-        quantity: parsedQuantity,
-        product_group: productGroup,
-        release_method_type: releaseMethodType,
-      };
-      const g = orderGtin.trim();
-      if (g.length >= 8) payload.gtin = g;
 
-      await apiClient.post("/emission-orders/", payload);
-      setIsModalOpen(false);
-      setQuantity("1");
-      setOrderGtin("");
-      setReleaseMethodType("PRODUCTION");
-      await loadOrders();
-    } catch (requestError) {
-      console.error("Failed to create emission order:", requestError);
-      if (axios.isAxiosError(requestError) && requestError.response?.status === 422) {
-        setError("Не удалось создать заказ: проверьте карточку товара и количество.");
-        return;
+    let created = 0;
+    let failed = 0;
+
+    for (let i = 0; i < orderRows.length; i++) {
+      const row = orderRows[i];
+      if (row._status === "sent") {
+        created++;
+        continue;
       }
-      setError("Не удалось создать заказ на эмиссию.");
-    } finally {
-      setIsSubmitting(false);
+
+      setOrderRows((prev) =>
+        prev.map((r, idx) => (idx === i ? { ...r, _status: "sending" } : r)),
+      );
+
+      try {
+        const payload: Record<string, unknown> = {
+          product_card_id: row.cardId,
+          quantity: row.quantity,
+          product_group: row.productGroup,
+          release_method_type: row.releaseMethodType,
+        };
+        if (row.gtin.length >= 8) payload.gtin = row.gtin;
+        if (row.productionOrderId) payload.production_order_id = row.productionOrderId;
+        if (row.paymentType) payload.payment_type = row.paymentType;
+
+        await apiClient.post("/emission-orders/", payload);
+        created++;
+        setOrderRows((prev) =>
+          prev.map((r, idx) =>
+            idx === i ? { ...r, _status: "sent", _error: undefined } : r,
+          ),
+        );
+      } catch (err: unknown) {
+        failed++;
+        let detail = "Ошибка";
+        if (axios.isAxiosError(err)) {
+          const responseDetail = err.response?.data?.detail;
+          if (typeof responseDetail === "string" && responseDetail.trim()) {
+            detail = responseDetail;
+          } else if (err.message) {
+            detail = err.message;
+          }
+        } else if (err instanceof Error) {
+          detail = err.message;
+        }
+        setOrderRows((prev) =>
+          prev.map((r, idx) =>
+            idx === i ? { ...r, _status: "error", _error: detail } : r,
+          ),
+        );
+      }
     }
+
+    setIsSubmitting(false);
+    if (failed === 0) {
+      setSyncInfo(`Создано черновиков заказов: ${created}`);
+      setOrderRows([]);
+      setSelectedRowIdx(new Set());
+      setIsModalOpen(false);
+      await loadOrders();
+    } else {
+      setError(
+        `Создано: ${created}, с ошибками: ${failed}. Наведите на «Ошибка» для деталей.`,
+      );
+      await loadOrders();
+    }
+  }
+
+  function handleRemoveOrderRow(idx: number) {
+    setOrderRows((prev) => prev.filter((_, i) => i !== idx));
+    setSelectedRowIdx((prev) => {
+      const next = new Set<number>();
+      prev.forEach((i) => {
+        if (i < idx) next.add(i);
+        else if (i > idx) next.add(i - 1);
+      });
+      return next;
+    });
+  }
+
+  function handleClearOrderRows() {
+    setOrderRows([]);
+    setSelectedRowIdx(new Set());
+    setEditingOrderCell(null);
+  }
+
+  function updateOrderRowField(rowIdx: number, field: string, value: string | number) {
+    setOrderRows((prev) =>
+      prev.map((row, idx) => {
+        if (idx !== rowIdx) return row;
+        if (field === "quantity") {
+          return { ...row, quantity: Math.max(1, Number(value) || 1) };
+        }
+        if (field === "gtin") {
+          return { ...row, gtin: String(value).replace(/\D/g, "").slice(0, 14) };
+        }
+        if (field === "paymentType") {
+          return { ...row, paymentType: value ? Number(value) : null };
+        }
+        return { ...row, [field]: value };
+      }),
+    );
+  }
+
+  function finishOrderCellEdit() {
+    setEditingOrderCell(null);
+  }
+
+  function applyReleaseMethodToAll(method: string) {
+    setOrderRows((prev) =>
+      prev.map((row) => ({
+        ...row,
+        releaseMethodType: method,
+      })),
+    );
+    setSyncInfo(
+      `Способ выпуска изменён для всех позиций: ${
+        RELEASE_METHOD_TYPES.find((t) => t.value === method)?.label
+      }`,
+    );
+  }
+
+  function applyPaymentTypeToAll(pt: number) {
+    setOrderRows((prev) =>
+      prev.map((row) => {
+        if (row.paymentType !== null) {
+          return { ...row, paymentType: pt };
+        }
+        return row;
+      }),
+    );
+    setSyncInfo(`Способ оплаты изменён: ${pt === 2 ? "по нанесению" : "по эмиссии"}`);
   }
 
   async function handleCloseOrder(orderId: string, suzOrderId: string) {
@@ -809,19 +1089,24 @@ export default function OrdersPage() {
               </div>
               <button
                 type="button"
-                onClick={() => setIsModalOpen(false)}
+                onClick={() => {
+                  setIsModalOpen(false);
+                  setProductionOrderId("");
+                  setPaymentType(null);
+                  setOrderRows([]);
+                }}
                 className="rounded-lg p-1 text-sage-500 transition hover:bg-forest-50"
               >
                 <X size={18} />
               </button>
             </div>
 
-            <form className="space-y-4" onSubmit={handleCreateOrder}>
+            <div className="space-y-4">
               <label className="flex flex-col gap-1.5">
                 <span className="label-text">Карточка товара</span>
                 <select
                   value={selectedCardId}
-                  onChange={(event) => setSelectedCardId(event.target.value)}
+                  onChange={(event) => handleSelectCard(event.target.value)}
                   required
                   className="select-field"
                 >
@@ -899,16 +1184,311 @@ export default function OrdersPage() {
                 ) : null}
               </div>
 
-              <div className="flex justify-end gap-2 pt-2">
-                <button type="button" onClick={() => setIsModalOpen(false)} className="btn-secondary">
-                  Отмена
+              {paymentSupported ? (
+                <div className="form-group">
+                  <label>Способ оплаты кодов</label>
+                  <select
+                    value={paymentType ?? 2}
+                    onChange={(e) => setPaymentType(Number(e.target.value))}
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                  >
+                    <option value={2}>Оплата по нанесению</option>
+                    <option value={1}>Оплата по эмиссии</option>
+                  </select>
+                  <p className="hint text-xs text-slate-400">
+                    По нанесению — списание при нанесении кода. По эмиссии — при получении.
+                  </p>
+                </div>
+              ) : null}
+
+              <div className="form-group">
+                <label>Идентификатор производственного заказа</label>
+                <input
+                  type="text"
+                  value={productionOrderId}
+                  onChange={(e) => {
+                    const v = e.target.value.replace(/[^a-zA-Z0-9\-]/g, "");
+                    setProductionOrderId(v);
+                  }}
+                  placeholder="Опционально, латиница (напр. ORDER-2026-001)"
+                  maxLength={256}
+                  className="input-field"
+                />
+                <p className="hint text-xs text-slate-400">
+                  Необязательное поле. Только латинские буквы, цифры и дефис.
+                </p>
+              </div>
+
+              {isSelectedBundle && !bundleHasItems && (
+                <div className="mt-2 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+                  Это набор, но у него не указан состав. Добавьте вложенные единицы
+                  в карточку набора в Национальном каталоге, затем заказывайте коды.
+                </div>
+              )}
+              {isSelectedBundle && bundleHasItems && (
+                <div className="mt-2 rounded border border-purple-200 bg-purple-50 px-3 py-2 text-xs text-purple-700">
+                  Набор «{selectedCard?.name}» содержит {selectedCard?.set_items.length} вложений.
+                  Кнопка «Добавить единицы для наборов» развернёт их в позиции заказа
+                  (количество = ваше количество × количество в наборе).
+                </div>
+              )}
+
+              <div className="flex justify-between gap-2 border-t border-slate-200 pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsModalOpen(false);
+                    setProductionOrderId("");
+                    setPaymentType(null);
+                    setOrderRows([]);
+                  }}
+                  className="btn-secondary"
+                >
+                  Закрыть
                 </button>
-                <button type="submit" disabled={isSubmitting || cards.length === 0} className="btn-primary">
-                  {isSubmitting ? <Loader2 size={16} className="animate-spin" /> : null}
-                  Создать заказ
+                <div className="flex gap-2">
+                  {isSelectedBundle ? (
+                    <button
+                      type="button"
+                      onClick={handleAddSetUnits}
+                      disabled={!bundleHasItems}
+                      className="btn-primary !bg-purple-600 hover:!bg-purple-700"
+                      title={
+                        bundleHasItems
+                          ? "Развернуть набор в единицы (количество из карточки НК)"
+                          : "У набора не указан состав в НК"
+                      }
+                    >
+                      + Добавить единицы для наборов
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={handleAddOrderRow}
+                      disabled={cards.length === 0}
+                      className="btn-primary"
+                    >
+                      + Добавить в заказ
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {orderRows.length > 0 ? (
+              <div className="mt-4 border-t border-slate-200 pt-3">
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="text-sm font-medium text-slate-700">
+                    Позиции заказа ({orderRows.length})
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleClearOrderRows}
+                    className="text-xs text-slate-500 hover:text-red-600"
+                  >
+                    Очистить
+                  </button>
+                </div>
+                <div className="mb-2 flex flex-wrap items-center gap-2 rounded bg-slate-50 p-2 text-xs">
+                  <span className="text-slate-500">Массово для всех:</span>
+                  <select
+                    onChange={(e) => {
+                      if (e.target.value) applyReleaseMethodToAll(e.target.value);
+                      e.target.value = "";
+                    }}
+                    defaultValue=""
+                    className="rounded border border-slate-300 px-2 py-1"
+                  >
+                    <option value="">Способ выпуска…</option>
+                    {RELEASE_METHOD_TYPES.map((t) => (
+                      <option key={t.value} value={t.value}>
+                        {t.label}
+                      </option>
+                    ))}
+                  </select>
+                  {orderRows.some((r) => r.paymentType !== null) && (
+                    <select
+                      onChange={(e) => {
+                        if (e.target.value) applyPaymentTypeToAll(Number(e.target.value));
+                        e.target.value = "";
+                      }}
+                      defaultValue=""
+                      className="rounded border border-slate-300 px-2 py-1"
+                    >
+                      <option value="">Способ оплаты…</option>
+                      <option value="2">Оплата по нанесению</option>
+                      <option value="1">Оплата по эмиссии</option>
+                    </select>
+                  )}
+                </div>
+                <div className="max-h-60 overflow-auto rounded border border-slate-200">
+                  <table className="w-full text-xs">
+                    <thead className="sticky top-0 bg-slate-50">
+                      <tr>
+                        <th className="px-2 py-1 text-left">Карточка</th>
+                        <th className="px-2 py-1 text-left">GTIN</th>
+                        <th className="px-2 py-1 text-left">Кол-во</th>
+                        <th className="px-2 py-1 text-left">Способ выпуска</th>
+                        <th className="px-2 py-1 text-left">Статус</th>
+                        <th className="px-2 py-1" />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {orderRows.map((row, idx) => {
+                        const canEditRow =
+                          !row._status || row._status === "draft" || row._status === "error";
+                        const rowCard = cards.find((c) => c.id === row.cardId);
+                        const isTechRow =
+                          rowCard?.gtin?.startsWith("029") || rowCard?.type === "tech_card";
+
+                        return (
+                        <tr key={idx} className="border-t border-slate-100">
+                          <td className="max-w-[120px] truncate px-2 py-1" title={row.cardName}>
+                            {row._isSetUnit && (
+                              <span className="mr-1 text-purple-600" title="Единица набора">
+                                ⬡
+                              </span>
+                            )}
+                            {row.cardName}
+                          </td>
+                          <td className="px-2 py-1 font-mono">
+                            {editingOrderCell?.rowIdx === idx &&
+                            editingOrderCell?.field === "gtin" &&
+                            canEditRow &&
+                            !isTechRow ? (
+                              <input
+                                type="text"
+                                inputMode="numeric"
+                                autoFocus
+                                value={row.gtin}
+                                maxLength={14}
+                                onChange={(e) => updateOrderRowField(idx, "gtin", e.target.value)}
+                                onBlur={finishOrderCellEdit}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter" || e.key === "Escape") finishOrderCellEdit();
+                                }}
+                                className="w-32 rounded border border-blue-400 px-1 py-0.5 font-mono"
+                              />
+                            ) : canEditRow && !isTechRow ? (
+                              <span
+                                className="cursor-pointer rounded px-1 hover:bg-blue-50"
+                                onClick={() => setEditingOrderCell({ rowIdx: idx, field: "gtin" })}
+                              >
+                                {row.gtin || "авто"}
+                              </span>
+                            ) : (
+                              <span>{row.gtin || "авто"}</span>
+                            )}
+                          </td>
+                          <td className="px-2 py-1">
+                            {editingOrderCell?.rowIdx === idx &&
+                            editingOrderCell?.field === "quantity" &&
+                            canEditRow ? (
+                              <input
+                                type="number"
+                                min={1}
+                                autoFocus
+                                value={row.quantity}
+                                onChange={(e) => updateOrderRowField(idx, "quantity", e.target.value)}
+                                onBlur={finishOrderCellEdit}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter" || e.key === "Escape") finishOrderCellEdit();
+                                }}
+                                className="w-16 rounded border border-blue-400 px-1 py-0.5"
+                              />
+                            ) : canEditRow ? (
+                              <span
+                                className="cursor-pointer rounded px-1 hover:bg-blue-50"
+                                onClick={() =>
+                                  setEditingOrderCell({ rowIdx: idx, field: "quantity" })
+                                }
+                              >
+                                {row.quantity}
+                              </span>
+                            ) : (
+                              <span>{row.quantity}</span>
+                            )}
+                          </td>
+                          <td className="px-2 py-1">
+                            {editingOrderCell?.rowIdx === idx &&
+                            editingOrderCell?.field === "releaseMethodType" &&
+                            canEditRow ? (
+                              <select
+                                autoFocus
+                                value={row.releaseMethodType}
+                                onChange={(e) => {
+                                  updateOrderRowField(idx, "releaseMethodType", e.target.value);
+                                  finishOrderCellEdit();
+                                }}
+                                onBlur={finishOrderCellEdit}
+                                className="rounded border border-blue-400 px-1 py-0.5"
+                              >
+                                {RELEASE_METHOD_TYPES.map((t) => (
+                                  <option key={t.value} value={t.value}>
+                                    {t.label}
+                                  </option>
+                                ))}
+                              </select>
+                            ) : canEditRow ? (
+                              <span
+                                className="cursor-pointer rounded px-1 hover:bg-blue-50"
+                                onClick={() =>
+                                  setEditingOrderCell({ rowIdx: idx, field: "releaseMethodType" })
+                                }
+                              >
+                                {RELEASE_METHOD_TYPES.find((t) => t.value === row.releaseMethodType)
+                                  ?.label || row.releaseMethodType}
+                              </span>
+                            ) : (
+                              <span>
+                                {RELEASE_METHOD_TYPES.find((t) => t.value === row.releaseMethodType)
+                                  ?.label || row.releaseMethodType}
+                              </span>
+                            )}
+                          </td>
+                          <td className="px-2 py-1">
+                            {row._status === "sent" ? (
+                              <span className="text-emerald-600">Создан ✓</span>
+                            ) : null}
+                            {row._status === "sending" ? (
+                              <span className="text-amber-600">Отправка...</span>
+                            ) : null}
+                            {row._status === "error" ? (
+                              <span className="text-red-600" title={row._error}>
+                                Ошибка
+                              </span>
+                            ) : null}
+                            {!row._status || row._status === "draft" ? (
+                              <span className="text-slate-400">Черновик</span>
+                            ) : null}
+                          </td>
+                          <td className="px-2 py-1">
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveOrderRow(idx)}
+                              className="text-red-500 hover:text-red-700"
+                            >
+                              ✕
+                            </button>
+                          </td>
+                        </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void handleCreateAllOrders()}
+                  disabled={isSubmitting}
+                  className="btn-primary mt-3 w-full"
+                >
+                  {isSubmitting
+                    ? "Создание заказов..."
+                    : `Создать все заказы (${orderRows.length})`}
                 </button>
               </div>
-            </form>
+            ) : null}
           </div>
         </div>
       ) : null}

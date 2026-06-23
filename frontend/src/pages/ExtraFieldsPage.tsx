@@ -3,6 +3,14 @@ import { Plus, Search } from "lucide-react";
 import apiClient from "../api/client";
 import Alert from "../components/ui/Alert";
 import EmptyState from "../components/ui/EmptyState";
+import type { FieldCatalogItem } from "../labels/blockRegistry";
+import {
+  buildExtraPayload,
+  emptyExtraFormState,
+  extraCatalogFieldsFromFieldCatalog,
+  extraFormStateFromRecord,
+  type ExtraCatalogField,
+} from "../utils/extraFieldsCatalog";
 
 interface ExtraField {
   id: string;
@@ -18,6 +26,7 @@ interface ExtraField {
   edo_inn: string | null;
   edo_kpp: string | null;
   edo_address: string | null;
+  extra?: Record<string, unknown>;
 }
 
 type FormState = {
@@ -63,6 +72,8 @@ export default function ExtraFieldsPage() {
   const [items, setItems] = useState<ExtraField[]>([]);
   const [selected, setSelected] = useState<ExtraField | null>(null);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
+  const [extraCatalogFields, setExtraCatalogFields] = useState<ExtraCatalogField[]>([]);
+  const [extraForm, setExtraForm] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [search, setSearch] = useState("");
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -81,6 +92,34 @@ export default function ExtraFieldsPage() {
     void load();
   }, []);
 
+  useEffect(() => {
+    async function loadCatalog() {
+      try {
+        const res = await apiClient.get<FieldCatalogItem[]>("/labels/field-catalog");
+        const fields = extraCatalogFieldsFromFieldCatalog(res.data);
+        setExtraCatalogFields(fields);
+        setExtraForm((prev) => {
+          const next = emptyExtraFormState(fields);
+          for (const field of fields) {
+            if (field.extraKey in prev) {
+              next[field.extraKey] = prev[field.extraKey];
+            }
+          }
+          return next;
+        });
+      } catch {
+        setLoadError("Не удалось загрузить каталог полей для этикетки.");
+      }
+    }
+    void loadCatalog();
+  }, []);
+
+  useEffect(() => {
+    if (selected && extraCatalogFields.length > 0) {
+      setExtraForm(extraFormStateFromRecord(extraCatalogFields, selected.extra));
+    }
+  }, [extraCatalogFields, selected]);
+
   function selectItem(item: ExtraField) {
     setSelected(item);
     setForm({
@@ -97,17 +136,22 @@ export default function ExtraFieldsPage() {
       edo_kpp: item.edo_kpp || "",
       edo_address: item.edo_address || "",
     });
+    setExtraForm(extraFormStateFromRecord(extraCatalogFields, item.extra));
   }
 
   function newItem() {
     setSelected(null);
     setForm(EMPTY_FORM);
+    setExtraForm(emptyExtraFormState(extraCatalogFields));
   }
 
   async function save() {
     setSaving(true);
     try {
-      await apiClient.post("/extra-fields/", formToPayload(form));
+      await apiClient.post("/extra-fields/", {
+        ...formToPayload(form),
+        extra: buildExtraPayload(extraCatalogFields, extraForm),
+      });
       await load();
       newItem();
     } finally {
@@ -237,6 +281,29 @@ export default function ExtraFieldsPage() {
               </div>
             ))}
           </div>
+
+          {extraCatalogFields.length > 0 ? (
+            <div className="mt-8 border-t border-forest-100 pt-6">
+              <h4 className="mb-4 text-sm font-semibold text-forest-900">
+                Дополнительные поля для этикетки
+              </h4>
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                {extraCatalogFields.map(({ extraKey, label }) => (
+                  <div key={extraKey}>
+                    <label className="label-text">{label}</label>
+                    <input
+                      type="text"
+                      value={extraForm[extraKey] ?? ""}
+                      onChange={(event) =>
+                        setExtraForm((prev) => ({ ...prev, [extraKey]: event.target.value }))
+                      }
+                      className="input-field"
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
 
           <div className="mt-8 flex flex-wrap gap-3">
             <button

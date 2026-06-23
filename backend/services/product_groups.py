@@ -179,3 +179,30 @@ def detect_product_group(cat_name: str) -> str:
 
 def get_product_group_label(pg: str) -> str:
     return PRODUCT_GROUP_LABELS.get(pg, pg)
+
+
+# Товарные группы, поддерживающие paymentType (тип оплаты)
+# По официальной документации СУЗ 3.0 (разделы 4.4.1.1.X).
+# ТГ без paymentType (perfumery, lp, shoes, tires, photo, tobacco,
+# automotive, linen) НЕ включены — для них СУЗ отклонит заказ с paymentType.
+PAYMENT_TYPE_PRODUCT_GROUPS: frozenset[str] = frozenset({
+    "milk",        # молочная продукция
+    "bicycle",     # велосипеды
+    "medicines",   # медизделия / лекарства
+    "water",       # упакованная вода
+    "antiseptic",  # антисептики
+    # остальные ТГ из документации (если появятся в проекте):
+    # пиво, БАД, корма, морепродукты, соки, игрушки, радиоэлектроника,
+    # косметика, консервы, ветпрепараты, стройматериалы, бакалея,
+    # моторные масла, сладости, мясо, мех, растительные масла
+})
+
+
+def product_group_supports_payment_type(product_group: str) -> bool:
+    """Проверить, поддерживает ли ТГ параметр paymentType."""
+    if not product_group:
+        return False
+    pg = normalize_suz_product_group(product_group)
+    if pg in {"perfume"}:
+        pg = "perfumery"
+    return pg in PAYMENT_TYPE_PRODUCT_GROUPS

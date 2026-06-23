@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import * as XLSX from "xlsx";
 import { Check, ChevronDown } from "lucide-react";
 import apiClient from "../api/client";
 import {
@@ -219,6 +220,52 @@ function getCardError(card: ProductCard): string | null {
 
 type CardFormData = typeof EMPTY_FORM;
 
+interface CardRowSnapshot {
+  form: CardFormData;
+  attrValues: Record<number, string | string[]>;
+  optionalAttrValues: Record<number, string | string[]>;
+  setItems: Array<{ gtin: string; quantity: number }>;
+  nkAttrs: NkAttr[];
+  nkOptionalAttrs: NkAttr[];
+  _status?: "draft" | "sending" | "sent" | "error";
+  _error?: string;
+}
+
+const EXCEL_COLUMNS: { key: keyof CardFormData | "set_items"; header: string }[] = [
+  { key: "type", header: "Тип" },
+  { key: "tn_ved", header: "Группа ТН ВЭД" },
+  { key: "tn_ved_code", header: "Код ТНВЭД" },
+  { key: "gtin", header: "GTIN" },
+  { key: "name", header: "Наименование" },
+  { key: "brand", header: "Бренд" },
+  { key: "product_kind", header: "Вид товара" },
+  { key: "color", header: "Цвет" },
+  { key: "gender", header: "Целевой пол" },
+  { key: "size_type", header: "Тип размера" },
+  { key: "size", header: "Размер" },
+  { key: "composition", header: "Состав" },
+  { key: "country", header: "Страна" },
+  { key: "model_article_type", header: "Тип артикула" },
+  { key: "model_article", header: "Артикул" },
+  { key: "regulation", header: "Регламент" },
+  { key: "set_items", header: "Состав набора (GTIN:кол-во через ;)" },
+];
+
+const TYPE_LABEL_TO_CODE: Record<string, ProductCardType> = {
+  "единица": "unit",
+  "единица товара": "unit",
+  "комплект": "set",
+  "техническая": "tech_card",
+  "техническая карточка": "tech_card",
+  "набор": "bundle",
+};
+const TYPE_CODE_TO_LABEL: Record<string, string> = {
+  unit: "Единица товара",
+  set: "Комплект",
+  tech_card: "Техническая карточка",
+  bundle: "Набор",
+};
+
 const SPECIAL_ATTR = {
   NAME: 2478,
   BRAND: 2504,
@@ -248,23 +295,63 @@ function tnvedCodePresetsFromAttr(attr: NkAttr | undefined): string[] {
   return attr.attr_preset.filter((p) => /^\d{10}$/.test(String(p).trim()));
 }
 
-const CARD_ROW_COLUMNS: { key: keyof CardFormData | "tn_ved"; label: string }[] = [
-  { key: "tn_ved", label: "Группа ТН..." },
-  { key: "name", label: "Наимен..." },
+const CARD_ROW_COLUMNS: { key: string; label: string }[] = [
+  { key: "type", label: "Тип" },
+  { key: "tn_ved", label: "Группа ТН ВЭД" },
+  { key: "name", label: "Наименование" },
   { key: "brand", label: "Бренд" },
-  { key: "model_article_type", label: "Модель..." },
-  { key: "model_article", label: "Модель..." },
-  { key: "product_kind", label: "Вид изд..." },
-  { key: "color", label: "Цвет" },
-  { key: "gender", label: "Целево..." },
-  { key: "size_type", label: "Тип раз..." },
-  { key: "size", label: "Размер" },
-  { key: "composition", label: "Состав..." },
-  { key: "tn_ved_code", label: "Код ТНВ..." },
-  { key: "regulation", label: "Регламент" },
   { key: "gtin", label: "GTIN" },
-  { key: "country", label: "Страна..." },
+  { key: "product_kind", label: "Вид изд." },
+  { key: "color", label: "Цвет" },
+  { key: "size", label: "Размер" },
+  { key: "country", label: "Страна" },
+  { key: "tn_ved_code", label: "Код ТНВЭД" },
 ];
+
+const SELECT_CELL_OPTIONS: Record<string, { value: string; label: string }[]> = {
+  type: [
+    { value: "unit", label: "Единица" },
+    { value: "set", label: "Комплект" },
+    { value: "tech_card", label: "Техническая" },
+    { value: "bundle", label: "Набор" },
+  ],
+};
+
+function isCellEditable(row: CardRowSnapshot, key: string): boolean {
+  if (key === "gtin" && row.form.type === "tech_card") return false;
+  if (key === "tn_ved" || key === "tn_ved_code") return false;
+  return true;
+}
+
+function formatRowCell(row: CardRowSnapshot, key: string): ReactNode {
+  if (key === "type") {
+    const labels: Record<string, string> = {
+      unit: "Единица",
+      set: "Комплект",
+      tech_card: "Техническая",
+      bundle: "Набор",
+    };
+    const label = labels[row.form.type] || row.form.type;
+    if (row.form.type === "bundle" && row.setItems.length === 0) {
+      return (
+        <span>
+          {label}{" "}
+          <span className="text-red-500" title="Состав не заполнен">
+            ⚠
+          </span>
+        </span>
+      );
+    }
+    return label;
+  }
+  if (key === "gtin") {
+    if (row.form.type === "tech_card") {
+      return <span className="text-slate-400 italic">авто (029)</span>;
+    }
+    return row.form.gtin || "—";
+  }
+  return String(row.form[key as keyof CardFormData] ?? "") || "—";
+}
 
 function optionalField(value: string): string | undefined {
   const trimmed = value.trim();
@@ -506,13 +593,16 @@ export default function CardsPage() {
   const [tnvedLoading, setTnvedLoading] = useState(false);
   const [tnvedDisplayValue, setTnvedDisplayValue] = useState("");
 
-  const [cardRows, setCardRows] = useState<CardFormData[]>([]);
+  const [cardRows, setCardRows] = useState<CardRowSnapshot[]>([]);
   const [selectedRowIndexes, setSelectedRowIndexes] = useState<Set<number>>(new Set());
+  const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
+  const [editingCell, setEditingCell] = useState<{ rowIdx: number; key: string } | null>(null);
   const [rowColumnFilters, setRowColumnFilters] = useState<Record<string, string>>({});
   const [rowsPageSize, setRowsPageSize] = useState(500);
   const [rowsPage, setRowsPage] = useState(0);
 
   const importRef = useRef<HTMLInputElement>(null);
+  const importBufferRef = useRef<HTMLInputElement>(null);
   const [importing, setImporting] = useState(false);
   const [sendingList, setSendingList] = useState(false);
 
@@ -1058,7 +1148,44 @@ export default function CardsPage() {
   }
 
   function handleAddRow() {
-    setCardRows((prev) => [...prev, { ...form }]);
+    if (!form.tn_ved.trim()) {
+      setError("Укажите группу ТНВЭД перед добавлением");
+      return;
+    }
+    const gtinError = form.type !== "tech_card" ? validateGtin(form.gtin || "") : null;
+    if (gtinError) {
+      setError(gtinError);
+      return;
+    }
+    const missing = getMissingRequired();
+    if (missing.length > 0) {
+      setError(`Заполните обязательные поля: ${missing.join(", ")}`);
+      return;
+    }
+
+    const snapshot: CardRowSnapshot = {
+      form: { ...form },
+      attrValues: { ...attrValues },
+      optionalAttrValues: { ...optionalAttrValues },
+      setItems: [...setItems],
+      nkAttrs: [...nkAttrs],
+      nkOptionalAttrs: [...nkOptionalAttrs],
+      _status: "draft",
+    };
+    setCardRows((prev) => [...prev, snapshot]);
+    setError(null);
+    setSuccess(`Добавлено в список: ${cardRows.length + 1}`);
+
+    setForm((f) => ({
+      ...EMPTY_FORM,
+      type: f.type,
+      tn_ved: f.tn_ved,
+      cat_id: f.cat_id,
+      brand: f.brand,
+    }));
+    setAttrValues({});
+    setOptionalAttrValues({});
+    setSetItems([]);
   }
 
   async function handleSaveOnly() {
@@ -1082,6 +1209,131 @@ export default function CardsPage() {
     setRowsPage(0);
   }
 
+  function handleExportRows() {
+    if (cardRows.length === 0) {
+      setError("Список пуст — нечего экспортировать");
+      return;
+    }
+    const data = cardRows.map((row) => {
+      const obj: Record<string, string> = {};
+      for (const col of EXCEL_COLUMNS) {
+        if (col.key === "type") {
+          obj[col.header] = TYPE_CODE_TO_LABEL[row.form.type] || row.form.type;
+        } else if (col.key === "set_items") {
+          obj[col.header] = row.setItems
+            .filter((it) => it.gtin)
+            .map((it) => `${it.gtin}:${it.quantity}`)
+            .join("; ");
+        } else {
+          obj[col.header] = String(row.form[col.key as keyof CardFormData] ?? "");
+        }
+      }
+      return obj;
+    });
+
+    const ws = XLSX.utils.json_to_sheet(data, {
+      header: EXCEL_COLUMNS.map((c) => c.header),
+    });
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Карточки");
+    XLSX.writeFile(wb, `cards_buffer_${new Date().toISOString().slice(0, 10)}.xlsx`);
+    setSuccess(`Экспортировано ${cardRows.length} карточек в Excel`);
+  }
+
+  async function handleImportRows(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: "array" });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws);
+
+      if (rows.length === 0) {
+        setError("Файл пуст");
+        return;
+      }
+      if (rows.length > 500) {
+        setError("Максимум 500 карточек (лимит ЧЗ)");
+        return;
+      }
+
+      const headerToKey: Record<string, string> = {};
+      for (const col of EXCEL_COLUMNS) {
+        headerToKey[col.header.toLowerCase()] = col.key;
+      }
+
+      const snapshots: CardRowSnapshot[] = rows.map((r) => {
+        const formData: Record<string, unknown> = { ...EMPTY_FORM };
+        let setItemsParsed: Array<{ gtin: string; quantity: number }> = [];
+
+        for (const [header, value] of Object.entries(r)) {
+          const key = headerToKey[String(header).trim().toLowerCase()];
+          if (!key) continue;
+          const strVal = value == null ? "" : String(value).trim();
+
+          if (key === "type") {
+            formData.type = TYPE_LABEL_TO_CODE[strVal.toLowerCase()] || "unit";
+          } else if (key === "set_items") {
+            setItemsParsed = strVal
+              .split(";")
+              .map((part) => {
+                const [g, q] = part.split(":").map((s) => s.trim());
+                return { gtin: g || "", quantity: parseInt(q) || 1 };
+              })
+              .filter((it) => it.gtin);
+          } else if (key === "gtin") {
+            formData.gtin = strVal.replace(/\D/g, "");
+          } else {
+            formData[key] = strVal;
+          }
+        }
+        formData.custom_name = Boolean(formData.name);
+
+        return {
+          form: formData as CardFormData,
+          attrValues: {},
+          optionalAttrValues: {},
+          setItems: setItemsParsed,
+          nkAttrs: [],
+          nkOptionalAttrs: [],
+          _status: "draft" as const,
+        };
+      });
+
+      setCardRows((prev) => [...prev, ...snapshots]);
+      setSuccess(
+        `Импортировано ${snapshots.length} карточек в список. Обязательные атрибуты НК дозаполните двойным кликом по строке или они подставятся на бэкенде. Проверьте и отправьте.`,
+      );
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "неизвестно";
+      setError("Ошибка чтения файла: " + message);
+    } finally {
+      e.target.value = "";
+    }
+  }
+
+  function handleDownloadTemplate() {
+    const example: Record<string, string> = {};
+    for (const col of EXCEL_COLUMNS) {
+      example[col.header] = "";
+    }
+    example["Тип"] = "Набор";
+    example["Группа ТН ВЭД"] = "3303";
+    example["GTIN"] = "04600000000001";
+    example["Наименование"] = "Подарочный набор (пример)";
+    example["Бренд"] = "Бренд";
+    example["Состав набора (GTIN:кол-во через ;)"] = "04600000000002:1; 04600000000003:2";
+
+    const ws = XLSX.utils.json_to_sheet([example], {
+      header: EXCEL_COLUMNS.map((c) => c.header),
+    });
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Шаблон");
+    XLSX.writeFile(wb, "template_cards.xlsx");
+    setSuccess("Шаблон скачан. Заполните и импортируйте обратно.");
+  }
+
   function toggleRowSelect(idx: number) {
     setSelectedRowIndexes((prev) => {
       const next = new Set(prev);
@@ -1089,6 +1341,91 @@ export default function CardsPage() {
       else next.add(idx);
       return next;
     });
+  }
+
+  function toggleRowExpand(idx: number) {
+    setExpandedRows((prev) => {
+      const next = new Set(prev);
+      if (next.has(idx)) next.delete(idx);
+      else next.add(idx);
+      return next;
+    });
+  }
+
+  function addSetItemToRow(rowIdx: number) {
+    setCardRows((prev) =>
+      prev.map((row, idx) =>
+        idx === rowIdx
+          ? { ...row, setItems: [...row.setItems, { gtin: "", quantity: 1 }] }
+          : row,
+      ),
+    );
+  }
+
+  function updateSetItemInRow(
+    rowIdx: number,
+    itemIdx: number,
+    field: "gtin" | "quantity",
+    value: string,
+  ) {
+    setCardRows((prev) =>
+      prev.map((row, idx) => {
+        if (idx !== rowIdx) return row;
+        const newItems = row.setItems.map((it, ii) => {
+          if (ii !== itemIdx) return it;
+          if (field === "gtin") {
+            return { ...it, gtin: value.replace(/\D/g, "").slice(0, 14) };
+          }
+          return { ...it, quantity: Math.max(1, parseInt(value) || 1) };
+        });
+        return { ...row, setItems: newItems };
+      }),
+    );
+  }
+
+  function removeSetItemFromRow(rowIdx: number, itemIdx: number) {
+    setCardRows((prev) =>
+      prev.map((row, idx) =>
+        idx === rowIdx
+          ? { ...row, setItems: row.setItems.filter((_, ii) => ii !== itemIdx) }
+          : row,
+      ),
+    );
+  }
+
+  function updateRowField(rowIdx: number, key: string, value: string) {
+    setCardRows((prev) =>
+      prev.map((row, idx) => {
+        if (idx !== rowIdx) return row;
+        let v = value;
+        if (key === "gtin") {
+          v = value.replace(/\D/g, "").slice(0, 14);
+        }
+        return {
+          ...row,
+          form: { ...row.form, [key]: v },
+        };
+      }),
+    );
+  }
+
+  function finishCellEdit() {
+    setEditingCell(null);
+  }
+
+  function openRowInForm(row: CardRowSnapshot) {
+    setForm({ ...row.form });
+    setAttrValues({ ...row.attrValues });
+    setOptionalAttrValues({ ...row.optionalAttrValues });
+    setSetItems([...row.setItems]);
+    const catId = row.form.cat_id ? parseInt(row.form.cat_id, 10) : undefined;
+    void loadAttrsForTnved(
+      row.form.tn_ved,
+      catId,
+      row.attrValues,
+      true,
+      row.optionalAttrValues,
+    );
   }
 
   function toggleAllRows() {
@@ -1154,7 +1491,7 @@ export default function CardsPage() {
         ? `${card.tn_ved}${card.name ? ` — ${card.name}` : ""}`
         : "",
     );
-    setCardRows([editForm]);
+    setCardRows([]);
     setSelectedRowIndexes(new Set());
     setRowColumnFilters({});
     setRowsPage(0);
@@ -1292,6 +1629,84 @@ export default function CardsPage() {
     } finally {
       setSubmitting(false);
     }
+  }
+
+  async function handleSubmitAllRows() {
+    if (cardRows.length === 0) {
+      setError("Список пуст. Добавьте карточки через «+ Добавить»");
+      return;
+    }
+    if (cardRows.length > 500) {
+      setError("Максимум 500 карточек за раз (лимит ЧЗ)");
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    setSuccess(null);
+
+    let sent = 0;
+    let failed = 0;
+
+    for (let i = 0; i < cardRows.length; i++) {
+      const row = cardRows[i];
+      if (row._status === "sent") {
+        sent++;
+        continue;
+      }
+
+      setCardRows((prev) =>
+        prev.map((r, idx) => (idx === i ? { ...r, _status: "sending" as const } : r)),
+      );
+
+      try {
+        const payload = buildPayload(
+          row.form,
+          row.attrValues,
+          row.nkAttrs,
+          row.optionalAttrValues,
+          row.nkOptionalAttrs,
+          row.setItems,
+        );
+        await apiClient.post("/product-cards/", payload);
+        sent++;
+        setCardRows((prev) =>
+          prev.map((r, idx) =>
+            idx === i ? { ...r, _status: "sent" as const, _error: undefined } : r,
+          ),
+        );
+      } catch (err: unknown) {
+        failed++;
+        const detail =
+          err &&
+          typeof err === "object" &&
+          "response" in err &&
+          err.response &&
+          typeof err.response === "object" &&
+          "data" in err.response &&
+          err.response.data &&
+          typeof err.response.data === "object" &&
+          "detail" in err.response.data
+            ? String((err.response.data as { detail: unknown }).detail)
+            : err instanceof Error
+              ? err.message
+              : "Ошибка";
+        setCardRows((prev) =>
+          prev.map((r, idx) =>
+            idx === i ? { ...r, _status: "error" as const, _error: String(detail) } : r,
+          ),
+        );
+      }
+    }
+
+    setSubmitting(false);
+    if (failed === 0) {
+      setSuccess(`Все ${sent} карточек отправлены в НК`);
+    } else {
+      setError(
+        `Отправлено: ${sent}, с ошибками: ${failed}. Наведите на «Ошибка» в строке для деталей.`,
+      );
+    }
+    await loadCards();
   }
 
   async function handleArchive(id: string) {
@@ -1533,7 +1948,7 @@ export default function CardsPage() {
     return cardRows.filter((row) => {
       for (const [field, value] of Object.entries(rowColumnFilters)) {
         if (!value.trim()) continue;
-        const cell = String(row[field as keyof CardFormData] ?? "").toLowerCase();
+        const cell = String(row.form[field as keyof CardFormData] ?? "").toLowerCase();
         if (!cell.includes(value.trim().toLowerCase())) return false;
       }
       return true;
@@ -2557,22 +2972,32 @@ export default function CardsPage() {
                   </button>
                   <button
                     type="button"
+                    onClick={handleDownloadTemplate}
                     className="rounded bg-slate-100 px-3 py-1 text-xs hover:bg-slate-200"
                   >
                     Шаблон Для Наборов
                   </button>
                   <button
                     type="button"
+                    onClick={handleExportRows}
                     className="rounded bg-slate-100 px-3 py-1 text-xs hover:bg-slate-200"
                   >
                     Экспорт
                   </button>
                   <button
                     type="button"
+                    onClick={() => importBufferRef.current?.click()}
                     className="rounded bg-slate-100 px-3 py-1 text-xs hover:bg-slate-200"
                   >
                     Импорт
                   </button>
+                  <input
+                    ref={importBufferRef}
+                    type="file"
+                    accept=".xlsx,.xls,.csv"
+                    className="hidden"
+                    onChange={handleImportRows}
+                  />
                 </div>
               </div>
 
@@ -2590,6 +3015,8 @@ export default function CardsPage() {
                           onChange={toggleAllRows}
                         />
                       </th>
+                      <th className="w-6 border-b border-slate-200 px-1 py-2"></th>
+                      <th className="w-6 border-b border-slate-200 px-1 py-2"></th>
                       {CARD_ROW_COLUMNS.map((col) => (
                         <th
                           key={col.key}
@@ -2612,13 +3039,16 @@ export default function CardsPage() {
                           </div>
                         </th>
                       ))}
+                      <th className="whitespace-nowrap border-b border-slate-200 px-2 py-2 text-left font-medium text-slate-600">
+                        Статус
+                      </th>
                     </tr>
                   </thead>
                   <tbody>
                     {pagedCardRows.length === 0 ? (
                       <tr>
                         <td
-                          colSpan={CARD_ROW_COLUMNS.length + 1}
+                          colSpan={CARD_ROW_COLUMNS.length + 4}
                           className="px-4 py-16 text-center text-slate-400"
                         >
                           Нет данных
@@ -2627,25 +3057,195 @@ export default function CardsPage() {
                     ) : (
                       pagedCardRows.map((row) => {
                         const idx = cardRows.indexOf(row);
+                        const isBundle = row.form.type === "bundle";
+                        const isExpanded = expandedRows.has(idx);
+
                         return (
-                          <tr
-                            key={idx}
-                            className="border-b border-slate-100 hover:bg-slate-50"
-                            onDoubleClick={() => setForm({ ...row })}
-                          >
-                            <td className="px-2 py-1.5">
-                              <input
-                                type="checkbox"
-                                checked={selectedRowIndexes.has(idx)}
-                                onChange={() => toggleRowSelect(idx)}
-                              />
-                            </td>
-                            {CARD_ROW_COLUMNS.map((col) => (
-                              <td key={col.key} className="px-2 py-1.5 text-slate-700">
-                                {String(row[col.key] ?? "") || "—"}
+                          <Fragment key={idx}>
+                            <tr className="border-b border-slate-100 hover:bg-slate-50">
+                              <td className="px-2 py-1.5">
+                                <input
+                                  type="checkbox"
+                                  checked={selectedRowIndexes.has(idx)}
+                                  onChange={() => toggleRowSelect(idx)}
+                                  onClick={(e) => e.stopPropagation()}
+                                />
                               </td>
-                            ))}
-                          </tr>
+                              <td className="w-6 px-1 py-1.5">
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    openRowInForm(row);
+                                  }}
+                                  title="Открыть в форме (для атрибутов НК)"
+                                  className="text-xs text-slate-400 hover:text-blue-600"
+                                >
+                                  ✎
+                                </button>
+                              </td>
+                              <td className="w-6 px-1 py-1.5">
+                                {isBundle && (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      toggleRowExpand(idx);
+                                    }}
+                                    className="text-slate-500 hover:text-slate-700"
+                                    title={isExpanded ? "Свернуть состав" : "Показать состав набора"}
+                                  >
+                                    {isExpanded ? "▼" : "▶"}
+                                  </button>
+                                )}
+                              </td>
+                              {CARD_ROW_COLUMNS.map((col) => {
+                                const isEditing =
+                                  editingCell?.rowIdx === idx && editingCell?.key === col.key;
+                                const editable = isCellEditable(row, col.key);
+                                const selectOptions = SELECT_CELL_OPTIONS[col.key];
+
+                                return (
+                                  <td
+                                    key={col.key}
+                                    className={`px-2 py-1.5 text-slate-700 ${editable ? "cursor-text" : ""}`}
+                                    onClick={(e) => {
+                                      if (!editable) return;
+                                      e.stopPropagation();
+                                      setEditingCell({ rowIdx: idx, key: col.key });
+                                    }}
+                                  >
+                                    {isEditing && selectOptions ? (
+                                      <select
+                                        autoFocus
+                                        value={row.form[col.key as keyof CardFormData] as string}
+                                        onChange={(e) => updateRowField(idx, col.key, e.target.value)}
+                                        onBlur={finishCellEdit}
+                                        onClick={(e) => e.stopPropagation()}
+                                        className="w-full rounded border border-blue-400 px-1 py-0.5 text-xs outline-none"
+                                      >
+                                        {selectOptions.map((o) => (
+                                          <option key={o.value} value={o.value}>
+                                            {o.label}
+                                          </option>
+                                        ))}
+                                      </select>
+                                    ) : isEditing ? (
+                                      <input
+                                        autoFocus
+                                        type="text"
+                                        inputMode={col.key === "gtin" ? "numeric" : undefined}
+                                        value={String(row.form[col.key as keyof CardFormData] ?? "")}
+                                        onChange={(e) => updateRowField(idx, col.key, e.target.value)}
+                                        onBlur={finishCellEdit}
+                                        onKeyDown={(e) => {
+                                          if (e.key === "Enter" || e.key === "Escape") finishCellEdit();
+                                        }}
+                                        onClick={(e) => e.stopPropagation()}
+                                        className="w-full rounded border border-blue-400 px-1 py-0.5 font-mono text-xs outline-none"
+                                      />
+                                    ) : (
+                                      formatRowCell(row, col.key)
+                                    )}
+                                  </td>
+                                );
+                              })}
+                              <td className="px-2 py-1.5">
+                                {row._status === "sent" && (
+                                  <span className="text-emerald-600 text-xs">Отправлено ✓</span>
+                                )}
+                                {row._status === "sending" && (
+                                  <span className="text-amber-600 text-xs">Отправка...</span>
+                                )}
+                                {row._status === "error" && (
+                                  <span className="text-red-600 text-xs" title={row._error}>
+                                    Ошибка
+                                  </span>
+                                )}
+                                {(!row._status || row._status === "draft") && (
+                                  <span className="text-slate-400 text-xs">Черновик</span>
+                                )}
+                              </td>
+                            </tr>
+
+                            {isBundle && isExpanded && (
+                              <tr className="bg-blue-50/40">
+                                <td colSpan={CARD_ROW_COLUMNS.length + 4} className="px-6 py-3">
+                                  <div className="border-l-2 border-blue-300 pl-3">
+                                    <div className="mb-2 flex items-center justify-between">
+                                      <span className="text-xs font-medium text-slate-600">
+                                        Состав набора «{row.form.name || "без названия"}»
+                                      </span>
+                                      <button
+                                        type="button"
+                                        onClick={() => addSetItemToRow(idx)}
+                                        className="rounded bg-blue-600 px-2 py-0.5 text-xs text-white hover:bg-blue-700"
+                                      >
+                                        + Вложение
+                                      </button>
+                                    </div>
+                                    {row.setItems.length === 0 ? (
+                                      <p className="text-xs text-slate-400">
+                                        Состав пуст. Добавьте GTIN товаров входящих в набор.
+                                      </p>
+                                    ) : (
+                                      <div className="space-y-1">
+                                        {row.setItems.map((item, itemIdx) => (
+                                          <div key={itemIdx} className="flex items-center gap-2">
+                                            <span className="w-5 text-xs text-slate-400">
+                                              {itemIdx + 1}.
+                                            </span>
+                                            <input
+                                              type="text"
+                                              inputMode="numeric"
+                                              placeholder="GTIN вложения (14 цифр)"
+                                              value={item.gtin}
+                                              maxLength={14}
+                                              onChange={(e) =>
+                                                updateSetItemInRow(
+                                                  idx,
+                                                  itemIdx,
+                                                  "gtin",
+                                                  e.target.value,
+                                                )
+                                              }
+                                              className="max-w-xs flex-1 rounded border border-slate-300 px-2 py-0.5 font-mono text-xs"
+                                            />
+                                            <span className="text-xs text-slate-400">×</span>
+                                            <input
+                                              type="number"
+                                              min={1}
+                                              value={item.quantity}
+                                              onChange={(e) =>
+                                                updateSetItemInRow(
+                                                  idx,
+                                                  itemIdx,
+                                                  "quantity",
+                                                  e.target.value,
+                                                )
+                                              }
+                                              className="w-16 rounded border border-slate-300 px-2 py-0.5 text-xs"
+                                            />
+                                            <button
+                                              type="button"
+                                              onClick={() => removeSetItemFromRow(idx, itemIdx)}
+                                              className="px-1 text-xs text-red-500 hover:text-red-700"
+                                            >
+                                              ✕
+                                            </button>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )}
+                                    <p className="mt-2 text-xs text-slate-400">
+                                      Один GTIN — одна строка. Для повторов используйте количество.
+                                      Вложения должны быть опубликованы в НК.
+                                    </p>
+                                  </div>
+                                </td>
+                              </tr>
+                            )}
+                          </Fragment>
                         );
                       })
                     )}
@@ -2718,14 +3318,29 @@ export default function CardsPage() {
                       </button>
                     </>
                   ) : (
-                    <button
-                      type="button"
-                      onClick={() => void handleSubmit(true)}
-                      disabled={submitting}
-                      className="rounded bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700 disabled:opacity-50"
-                    >
-                      {submitting ? "Создание..." : "Создать и отправить в НК"}
-                    </button>
+                    <div className="flex gap-2">
+                      {cardRows.length > 0 ? (
+                        <button
+                          type="button"
+                          onClick={() => void handleSubmitAllRows()}
+                          disabled={submitting}
+                          className="rounded bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700 disabled:opacity-50"
+                        >
+                          {submitting
+                            ? "Отправка..."
+                            : `Создать и отправить все (${cardRows.length})`}
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => void handleSubmit(true)}
+                          disabled={submitting}
+                          className="rounded bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700 disabled:opacity-50"
+                        >
+                          {submitting ? "Создание..." : "Создать и отправить в НК"}
+                        </button>
+                      )}
+                    </div>
                   )}
                 </div>
               </div>

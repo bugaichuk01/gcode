@@ -290,8 +290,28 @@ class EmissionOrderCreate(BaseModel):
     release_method_type: str | None = Field(
         None,
         max_length=32,
-        description="Способ выпуска в СУЗ: PRODUCTION, REMARK, REAPPLY и др.",
+        description="Способ выпуска СУЗ: PRODUCTION, IMPORT, REMAINS, REMARK, COMMISSION, REAPPLY",
     )
+    production_order_id: str | None = Field(
+        None,
+        max_length=256,
+        description="Идентификатор производственного заказа (опционально)",
+    )
+    payment_type: int | None = Field(
+        None,
+        ge=1,
+        le=2,
+        description="Тип оплаты: 1=по эмиссии, 2=по нанесению (только для поддерживающих ТГ)",
+    )
+
+    @field_validator("production_order_id", mode="before")
+    @classmethod
+    def _strip_poid(cls, v: object) -> object:
+        if v is None:
+            return None
+        s = str(v).strip()
+        return s or None
+
     @field_validator("gtin", mode="before")
     @classmethod
     def _strip_optional_gtin(cls, v: object) -> object:
