@@ -280,6 +280,71 @@ class GtinExtraFieldsResponse(GtinExtraFieldsBase):
 class GtinExtraFieldsListResponse(BaseModel):
     items: list[GtinExtraFieldsResponse]
     total: int
+class GtinExtraFieldsBulkFields(BaseModel):
+    name: str | None = None
+    article: str | None = None
+    size: str | None = None
+    color: str | None = None
+    barcode: str | None = None
+    country: str | None = None
+    brand: str | None = None
+    composition: str | None = None
+    edo_inn: str | None = None
+    edo_kpp: str | None = None
+    edo_address: str | None = None
+    extra: dict[str, Any] | None = None
+class GtinExtraFieldsBulkRequest(BaseModel):
+    gtins: list[str] = Field(..., min_length=1)
+    fields: GtinExtraFieldsBulkFields
+class GtinExtraFieldsBulkResponse(BaseModel):
+    updated: int
+    created: int
+    total: int
+
+
+class GtinExtraFieldsImportRow(BaseModel):
+    gtin: str = Field(..., min_length=1)
+    fields: GtinExtraFieldsBulkFields
+
+
+class GtinExtraFieldsImportRequest(BaseModel):
+    rows: list[GtinExtraFieldsImportRow] = Field(..., min_length=1)
+
+
+class GtinExtraFieldsImportResponse(BaseModel):
+    updated: int
+    created: int
+    total: int
+    skipped: int
+
+
+class GtinExtraFieldsClearFieldRequest(BaseModel):
+    gtins: list[str] = Field(..., min_length=1)
+    field: str = Field(..., min_length=1)
+
+
+class GtinExtraFieldsClearFieldResponse(BaseModel):
+    cleared: int
+    skipped: int
+
+
+class ExtraFieldsTemplateCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    fields: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExtraFieldsTemplateListItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    name: str
+    created_at: datetime
+
+
+class ExtraFieldsTemplateResponse(ExtraFieldsTemplateListItem):
+    fields: dict[str, Any]
+
+
 class EmissionOrderCreate(BaseModel):
     product_card_id: UUID
     quantity: int = Field(..., gt=0)
@@ -435,6 +500,33 @@ class SuzConnectivityDiagnosticsResponse(BaseModel):
     probes: list[dict[str, Any]]
     verdict: str
     docs_pointer: str
+
+
+class LabelImageUploadResponse(BaseModel):
+    id: UUID
+    mime: str
+
+
+class LabelPdfFileListItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    filename: str
+    pages_count: int
+    codes_count: int
+    created_at: datetime
+
+
+class LabelPdfSplitFileItem(BaseModel):
+    id: UUID
+    filename: str
+    pages_count: int
+
+
+class LabelPdfSplitResponse(BaseModel):
+    files: list[LabelPdfSplitFileItem]
+
+
 class LabelTemplateCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     width_mm: int = Field(58, gt=0)
@@ -579,6 +671,7 @@ class AggregationDocumentCreate(BaseModel):
     marking_codes: list[str]
     product_group: str = "perfumery"
     kitu_code: str | None = None
+    units_capacity: int | None = None
 class AggregationSendRequest(BaseModel):
     signature: str
 class AggregationDocumentResponse(BaseModel):
@@ -588,6 +681,7 @@ class AggregationDocumentResponse(BaseModel):
     product_group: str
     marking_codes: list[str]
     status: AggregationStatus
+    units_capacity: int | None
     document_id: str | None
     error_message: str | None
     created_at: datetime
@@ -596,6 +690,33 @@ class AggregationBodyPreview(BaseModel):
     body: str
     body_b64: str
     kitu_code: str
+
+
+class KituBatchGenerateRequest(BaseModel):
+    gcp: str = Field(default="460000000", min_length=1, max_length=9)
+    extension: int = Field(default=0, ge=0, le=9)
+    count: int = Field(default=1, ge=1, le=500)
+    units_per_kitu: int | None = Field(default=10, ge=1)
+    unlimited: bool = False
+
+    @model_validator(mode="after")
+    def validate_units(self) -> "KituBatchGenerateRequest":
+        if self.unlimited:
+            return self
+        if self.units_per_kitu is None or self.units_per_kitu < 1:
+            raise ValueError("Укажите количество единиц на КИТУ или включите «без ограничений»")
+        return self
+
+
+class KituBatchItem(BaseModel):
+    kitu_code: str
+    units_capacity: int | None
+
+
+class KituBatchGenerateResponse(BaseModel):
+    items: list[KituBatchItem]
+    gcp: str
+    extension: int
 class UpdCreateRequest(BaseModel):
     document_number: str = Field(..., min_length=1, max_length=128)
     marking_codes: list[str] = Field(default_factory=list)

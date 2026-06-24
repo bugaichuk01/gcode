@@ -4,10 +4,11 @@ export type GtinProductFields = {
   name: string;
   article: string;
   size: string;
+  barcode: string;
 };
 
 export async function fetchGtinProductFields(gtin: string): Promise<GtinProductFields> {
-  const fields: GtinProductFields = { name: "", article: "", size: "" };
+  const fields: GtinProductFields = { name: "", article: "", size: "", barcode: "" };
   if (!gtin) {
     return fields;
   }
@@ -24,6 +25,7 @@ export async function fetchGtinProductFields(gtin: string): Promise<GtinProductF
       if (extra.name) fields.name = extra.name;
       if (extra.article) fields.article = extra.article;
       if (extra.size) fields.size = extra.size;
+      if (extra.barcode) fields.barcode = extra.barcode;
     }
   }
 
@@ -47,4 +49,12 @@ export async function fetchGtinProductFieldsMap(
     unique.map(async (gtin) => [gtin, await fetchGtinProductFields(gtin)] as const),
   );
   return Object.fromEntries(entries);
+}
+
+export async function upsertGtinBarcode(gtin: string, barcode: string): Promise<void> {
+  const trimmed = barcode.trim();
+  await apiClient.post("/extra-fields/", {
+    gtin,
+    barcode: trimmed === "" ? null : trimmed,
+  });
 }

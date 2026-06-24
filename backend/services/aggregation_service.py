@@ -41,8 +41,8 @@ from settings import get_settings
 
 logger = logging.getLogger(__name__)
 
-
-
+DEFAULT_KITU_GCP = "460000000"
+MAX_KITU_BATCH_SIZE = 500
 
 
 def _gs1_check_digit(digits: str) -> int:
@@ -61,30 +61,117 @@ def _gs1_check_digit(digits: str) -> int:
     return (10 - (total % 10)) % 10
 
 
-def generate_kitu_code(gcp: str = "460000000") -> str:
+def normalize_kitu_gcp(gcp: str) -> str:
+    """Нормализовать GCP до 9 цифр (дополнение нулями справа)."""
+    digits = "".join(ch for ch in gcp if ch.isdigit())
+    if not digits:
+        raise ValueError("GCP должен содержать хотя бы одну цифру")
+    if len(digits) > 9:
+        raise ValueError("GCP не может быть длиннее 9 цифр")
+    return (digits + "000000000")[:9]
+
+
+def validate_kitu_extension(extension: int) -> str:
+    if extension < 0 or extension > 9:
+        raise ValueError("Расширение SSCC должно быть от 0 до 9")
+    return str(extension)
+
+
+def verify_sscc_check_digit(sscc: str) -> bool:
+    """Проверить контрольную цифру GS1 для 18-значного SSCC."""
+    if len(sscc) != 18 or not sscc.isdigit():
+        return False
+    return int(sscc[-1]) == _gs1_check_digit(sscc[:-1])
+
+
+def _build_sscc(extension: str, gcp_9: str, serial: str) -> str:
+    digits_17 = extension + gcp_9 + serial
+    check = _gs1_check_digit(digits_17)
+    sscc = digits_17 + str(check)
+    if len(sscc) != 18:
+        raise ValueError(f"SSCC должен быть 18 цифр, получено {len(sscc)}")
+    return sscc
+
+
+def _random_serial() -> str:
+    timestamp = str(int(time.time()))[-4:]
+    random_part = str(random.randint(0, 999)).zfill(3)
+    return (timestamp + random_part)[:7]
+
+
+def generate_kitu_code(
+    gcp: str = DEFAULT_KITU_GCP,
+    extension: int = 0,
+    *,
+    serial: str | None = None,
+) -> str:
     """
     Генерировать SSCC код (18 цифр) для КИТУ.
 
     Структура SSCC:
-    - 1 цифра: расширение (0)
+    - 1 цифра: расширение (0-9)
     - 9 цифр: GCP (глобальный префикс компании)
     - 7 цифр: серийный номер
     - 1 цифра: контрольная (алгоритм GS1)
-
-    Итого: 18 цифр
     """
-    extension = "0"
-    gcp_9 = (gcp + "000000000")[:9]
-    timestamp = str(int(time.time()))[-4:]
-    random_part = str(random.randint(0, 999)).zfill(3)
-    serial = (timestamp + random_part)[:7]
+    ext_str = validate_kitu_extension(extension)
+    gcp_9 = normalize_kitu_gcp(gcp)
+    serial_7 = serial if serial is not None else _random_serial()
+    if len(serial_7) != 7 or not serial_7.isdigit():
+        raise ValueError("Серийный номер должен быть 7 цифр")
+    return _build_sscc(ext_str, gcp_9, serial_7)
 
-    digits_17 = extension + gcp_9 + serial
-    check = _gs1_check_digit(digits_17)
 
-    sscc = digits_17 + str(check)
-    assert len(sscc) == 18, f"SSCC должен быть 18 цифр, получено {len(sscc)}"
-    return sscc
+def generate_kitu_batch(
+    *,
+    gcp: str = DEFAULT_KITU_GCP,
+    extension: int = 0,
+    count: int = 1,
+    units_per_kitu: int | None = None,
+    unlimited: bool = False,
+) -> list[dict[str, str | int | None]]:
+    """
+    Сгенерировать партию уникальных SSCC для КИТУ.
+
+    GCP: пока передаётся в запросе (дефолт DEFAULT_KITU_GCP).
+    В перспективе — поле organization_settings.sscc_gcp.
+    """
+    if count < 1:
+        raise ValueError("Количество КИТУ должно быть не меньше 1")
+    if count > MAX_KITU_BATCH_SIZE:
+        raise ValueError(f"Максимум {MAX_KITU_BATCH_SIZE} КИТУ за один запрос")
+    if unlimited:
+        capacity: int | None = None
+    else:
+        if units_per_kitu is None or units_per_kitu < 1:
+            raise ValueError("Укажите количество единиц на КИТУ или включите «без ограничений»")
+        capacity = units_per_kitu
+
+    ext_str = validate_kitu_extension(extension)
+    gcp_9 = normalize_kitu_gcp(gcp)
+    base_seed = int(time.time()) % 1_000_000
+    used_serials: set[str] = set()
+    items: list[dict[str, str | int | None]] = []
+
+    for index in range(count):
+        attempt = 0
+        while True:
+            serial_num = (base_seed + index * 7919 + attempt * 9973) % 10_000_000
+            serial = str(serial_num).zfill(7)
+            if serial not in used_serials:
+                used_serials.add(serial)
+                break
+            attempt += 1
+            if attempt > 100:
+                raise RuntimeError("Не удалось сгенерировать уникальный серийный номер в партии")
+
+        kitu_code = _build_sscc(ext_str, gcp_9, serial)
+        items.append({
+            "kitu_code": kitu_code,
+            "units_capacity": capacity,
+        })
+
+    return items
 
 
 
@@ -100,6 +187,7 @@ async def create_aggregation_draft(
         kitu_code=kitu,
         product_group=data.product_group,
         marking_codes=data.marking_codes,
+        units_capacity=data.units_capacity,
         status=AggregationStatus.DRAFT,
         org_id=org_id,
     )

@@ -5,11 +5,14 @@ import Alert from "../components/ui/Alert";
 import { signBodyBase64 } from "../services/signingService";
 import { useProductGroups } from "../hooks/useProductGroups";
 
+const DEFAULT_GCP = "460000000";
+
 interface AggregationDocument {
   id: string;
   kitu_code: string;
   product_group: string;
   marking_codes: string[];
+  units_capacity: number | null;
   status: "draft" | "pending" | "accepted" | "rejected" | "error";
   document_id: string | null;
   error_message: string | null;
@@ -17,7 +20,20 @@ interface AggregationDocument {
   sent_at: string | null;
 }
 
-const statusConfig: Record<
+interface GeneratedAggregate {
+  id: string;
+  kitu_code: string;
+  units_capacity: number | null;
+  status: "generated";
+}
+
+interface KituBatchResponse {
+  items: { kitu_code: string; units_capacity: number | null }[];
+  gcp: string;
+  extension: number;
+}
+
+const docStatusConfig: Record<
   AggregationDocument["status"],
   { label: string; className: string }
 > = {
@@ -28,6 +44,10 @@ const statusConfig: Record<
   error: { label: "Ошибка", className: "badge-error" },
 };
 
+function formatUnitsCapacity(capacity: number | null): string {
+  return capacity === null ? "Без ограничений" : String(capacity);
+}
+
 export default function AggregationPage() {
   const { groups: productGroups } = useProductGroups();
   const [documents, setDocuments] = useState<AggregationDocument[]>([]);
@@ -35,6 +55,15 @@ export default function AggregationPage() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [signing, setSigning] = useState<string | null>(null);
+
+  const [gcp, setGcp] = useState(DEFAULT_GCP);
+  const [extension, setExtension] = useState(0);
+  const [kituCount, setKituCount] = useState(5);
+  const [unlimited, setUnlimited] = useState(false);
+  const [unitsPerKitu, setUnitsPerKitu] = useState(10);
+  const [generating, setGenerating] = useState(false);
+  const [aggregates, setAggregates] = useState<GeneratedAggregate[]>([]);
+  const [assemblyMode, setAssemblyMode] = useState<"before" | "after">("before");
 
   const [showForm, setShowForm] = useState(false);
   const [codesText, setCodesText] = useState("");
@@ -69,6 +98,58 @@ export default function AggregationPage() {
       sessionStorage.removeItem("aggregationCodes");
     }
   }, []);
+
+  async function handleBatchGenerate() {
+    if (kituCount < 1) {
+      setError("Количество КИТУ должно быть не меньше 1");
+      return;
+    }
+    if (!unlimited && unitsPerKitu < 1) {
+      setError("Укажите количество единиц на КИТУ");
+      return;
+    }
+
+    setGenerating(true);
+    setError(null);
+    try {
+      const res = await apiClient.post<KituBatchResponse>("/aggregation/generate-kitu-batch", {
+        gcp,
+        extension,
+        count: kituCount,
+        units_per_kitu: unlimited ? null : unitsPerKitu,
+        unlimited,
+      });
+      const newItems: GeneratedAggregate[] = res.data.items.map((item) => ({
+        id: crypto.randomUUID(),
+        kitu_code: item.kitu_code,
+        units_capacity: item.units_capacity,
+        status: "generated",
+      }));
+      setAggregates((prev) => [...prev, ...newItems]);
+      setSuccess(`Сгенерировано ${newItems.length} КИТУ (расширение ${res.data.extension})`);
+    } catch (err: unknown) {
+      const detail =
+        err && typeof err === "object" && "response" in err
+          ? (err as { response?: { data?: { detail?: string } } }).response?.data?.detail
+          : undefined;
+      setError(typeof detail === "string" ? detail : "Ошибка генерации партии");
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  function handleClearAggregates() {
+    setAggregates([]);
+  }
+
+  function handleRemoveAggregate(id: string) {
+    setAggregates((prev) => prev.filter((a) => a.id !== id));
+  }
+
+  function handleUseAggregateForPackage(agg: GeneratedAggregate) {
+    setKituCode(agg.kitu_code);
+    setShowForm(true);
+  }
 
   async function handleCreate() {
     const codes = codesText
@@ -183,7 +264,7 @@ export default function AggregationPage() {
     <div className="page-container">
       <PageHeader
         title="Агрегация КИТУ"
-        description="Создание транспортных упаковок — объединение КМ под одним КИТУ/SSCC кодом"
+        description="Генерация партии SSCC и формирование транспортных упаковок"
         actions={
           <button
             type="button"
@@ -207,9 +288,191 @@ export default function AggregationPage() {
       ) : null}
 
       <div className="mb-6 rounded-xl border border-forest-200 bg-forest-50/80 px-4 py-3 text-sm text-forest-800">
-        <strong>Агрегация КИТУ</strong> — объединение нескольких КМ под одним транспортным кодом
-        (SSCC). КМ должны быть в статусе «Нанесён» или «В обороте». После агрегации при отгрузке
-        достаточно отсканировать один КИТУ.
+        <strong>Агрегация КИТУ</strong> — генерация SSCC-кодов партией и объединение КМ под
+        транспортным кодом. Сканирование и наполнение единицами — в следующих шагах (P6.8).
+      </div>
+
+      <div className="card mb-6">
+        <h2 className="mb-4 text-base font-semibold text-sage-900">Генерация КИТУ</h2>
+        <div className="mb-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <div>
+            <label className="mb-1 block text-sm font-medium text-sage-700">
+              Префикс предприятия (GCP)
+            </label>
+            <input
+              type="text"
+              value={gcp}
+              onChange={(e) => setGcp(e.target.value.replace(/\D/g, "").slice(0, 9))}
+              placeholder={DEFAULT_GCP}
+              className="input-field font-mono text-sm"
+            />
+            <p className="mt-1 text-xs text-sage-400">До 9 цифр; хранится в форме (позже — в настройках орг.)</p>
+          </div>
+          <div>
+            <label className="mb-1 block text-sm font-medium text-sage-700">Расширение</label>
+            <select
+              value={extension}
+              onChange={(e) => setExtension(Number(e.target.value))}
+              className="select-field"
+            >
+              {Array.from({ length: 10 }, (_, i) => (
+                <option key={i} value={i}>
+                  {i}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="mb-1 block text-sm font-medium text-sage-700">Кол-во КИТУ</label>
+            <input
+              type="number"
+              min={1}
+              max={500}
+              value={kituCount}
+              onChange={(e) => setKituCount(Math.max(1, Number(e.target.value) || 1))}
+              className="input-field"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-sm font-medium text-sage-700">Кол-во единиц</label>
+            <input
+              type="number"
+              min={1}
+              value={unitsPerKitu}
+              disabled={unlimited}
+              onChange={(e) => setUnitsPerKitu(Math.max(1, Number(e.target.value) || 1))}
+              className="input-field disabled:opacity-50"
+            />
+            <label className="mt-2 flex items-center gap-2 text-sm text-sage-600">
+              <input
+                type="checkbox"
+                checked={unlimited}
+                onChange={(e) => setUnlimited(e.target.checked)}
+                className="rounded border-sage-300"
+              />
+              Без ограничений
+            </label>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => void handleBatchGenerate()}
+          disabled={generating}
+          className="btn-accent"
+        >
+          {generating ? "Генерация..." : "Сгенерировать партию"}
+        </button>
+      </div>
+
+      <div className="mb-4 flex flex-wrap items-center gap-6 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+        <span className="text-sm font-medium text-sage-700">Режим работы (сканер — P6.8):</span>
+        <label className="flex items-center gap-2 text-sm text-sage-500">
+          <input
+            type="radio"
+            name="assemblyMode"
+            value="before"
+            checked={assemblyMode === "before"}
+            onChange={() => setAssemblyMode("before")}
+            disabled
+          />
+          До сборки
+        </label>
+        <label className="flex items-center gap-2 text-sm text-sage-500">
+          <input
+            type="radio"
+            name="assemblyMode"
+            value="after"
+            checked={assemblyMode === "after"}
+            onChange={() => setAssemblyMode("after")}
+            disabled
+          />
+          После сборки
+        </label>
+      </div>
+
+      <div className="mb-6">
+        <div className="mb-2 flex items-center justify-between">
+          <h2 className="text-base font-semibold text-sage-900">Агрегаты (КИТУ)</h2>
+          <button
+            type="button"
+            onClick={handleClearAggregates}
+            disabled={aggregates.length === 0}
+            className="btn-secondary btn-sm disabled:opacity-50"
+          >
+            Очистить
+          </button>
+        </div>
+        <div className="table-container">
+          <table className="table-base">
+            <thead>
+              <tr>
+                <th>КИТУ</th>
+                <th>Кол-во единиц</th>
+                <th>Статус</th>
+                <th>Действия</th>
+              </tr>
+            </thead>
+            <tbody>
+              {aggregates.length === 0 ? (
+                <tr>
+                  <td colSpan={4} className="px-4 py-6 text-center text-sage-400">
+                    Сгенерируйте партию КИТУ выше
+                  </td>
+                </tr>
+              ) : (
+                aggregates.map((agg) => (
+                  <tr key={agg.id}>
+                    <td className="font-mono text-xs">{agg.kitu_code}</td>
+                    <td>{formatUnitsCapacity(agg.units_capacity)}</td>
+                    <td>
+                      <span className="badge-draft">Сгенерирован</span>
+                    </td>
+                    <td>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleUseAggregateForPackage(agg)}
+                          className="btn-sm btn-secondary"
+                        >
+                          В упаковку
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveAggregate(agg.id)}
+                          className="px-2 py-1 text-xs text-red-500 hover:bg-red-50 rounded"
+                        >
+                          Удалить
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="mb-8">
+        <h2 className="mb-2 text-base font-semibold text-sage-900">Единицы</h2>
+        <div className="table-container">
+          <table className="table-base">
+            <thead>
+              <tr>
+                <th>Код</th>
+                <th>Статус</th>
+                <th>Товар</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td colSpan={3} className="px-4 py-6 text-center text-sage-400">
+                  Наполнение единицами — в следующих шагах (сканер / импорт)
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </div>
 
       {showForm ? (
@@ -256,7 +519,7 @@ export default function AggregationPage() {
                   ↻
                 </button>
               </div>
-              <p className="mt-1 text-xs text-sage-400">18–74 символа, уникальный в рамках организации</p>
+              <p className="mt-1 text-xs text-sage-400">18 цифр SSCC</p>
             </div>
           </div>
 
@@ -294,6 +557,7 @@ export default function AggregationPage() {
         </div>
       ) : null}
 
+      <h2 className="mb-2 text-base font-semibold text-sage-900">Документы агрегации (отправка в ЧЗ)</h2>
       <div className="table-container">
         <table className="table-base">
           <thead>
@@ -302,6 +566,7 @@ export default function AggregationPage() {
               <th>КИТУ код</th>
               <th>Группа</th>
               <th>Товаров</th>
+              <th>Ёмкость</th>
               <th>Статус</th>
               <th>ID документа</th>
               <th>Действия</th>
@@ -310,13 +575,13 @@ export default function AggregationPage() {
           <tbody>
             {loading ? (
               <tr>
-                <td colSpan={7} className="px-4 py-8 text-center text-sage-400">
+                <td colSpan={8} className="px-4 py-8 text-center text-sage-400">
                   Загрузка...
                 </td>
               </tr>
             ) : documents.length === 0 ? (
               <tr>
-                <td colSpan={7} className="px-4 py-8 text-center text-sage-400">
+                <td colSpan={8} className="px-4 py-8 text-center text-sage-400">
                   Нет упаковок. Создайте первую транспортную упаковку.
                 </td>
               </tr>
@@ -329,9 +594,10 @@ export default function AggregationPage() {
                   <td className="font-mono text-xs">{doc.kitu_code}</td>
                   <td>{doc.product_group}</td>
                   <td>{doc.marking_codes.length}</td>
+                  <td>{formatUnitsCapacity(doc.units_capacity)}</td>
                   <td>
-                    <span className={statusConfig[doc.status].className}>
-                      {statusConfig[doc.status].label}
+                    <span className={docStatusConfig[doc.status].className}>
+                      {docStatusConfig[doc.status].label}
                     </span>
                     {doc.error_message ? (
                       <p

@@ -12,9 +12,16 @@ from schemas import (
     AggregationDocumentCreate,
     AggregationDocumentResponse,
     AggregationSendRequest,
+    KituBatchGenerateRequest,
+    KituBatchGenerateResponse,
+    KituBatchItem,
 )
 from services import aggregation_service
-from services.aggregation_service import generate_kitu_code
+from services.aggregation_service import (
+    generate_kitu_batch,
+    generate_kitu_code,
+    normalize_kitu_gcp,
+)
 
 router = APIRouter(prefix="/aggregation", tags=["aggregation"])
 
@@ -54,8 +61,33 @@ async def list_documents(
 async def get_new_kitu(
     _: User = Depends(get_current_user),
 ) -> dict:
-    """Сгенерировать новый КИТУ/SSCC код."""
+    """Сгенерировать новый КИТУ/SSCC код (один, расширение 0)."""
     return {"kitu_code": generate_kitu_code()}
+
+
+@router.post("/generate-kitu-batch", response_model=KituBatchGenerateResponse)
+async def generate_kitu_batch_endpoint(
+    payload: KituBatchGenerateRequest,
+    _: User = Depends(get_current_user),
+) -> KituBatchGenerateResponse:
+    """Сгенерировать партию КИТУ/SSCC кодов."""
+    try:
+        gcp_normalized = normalize_kitu_gcp(payload.gcp)
+        items_raw = generate_kitu_batch(
+            gcp=payload.gcp,
+            extension=payload.extension,
+            count=payload.count,
+            units_per_kitu=payload.units_per_kitu,
+            unlimited=payload.unlimited,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    items = [KituBatchItem(**item) for item in items_raw]
+    return KituBatchGenerateResponse(
+        items=items,
+        gcp=gcp_normalized,
+        extension=payload.extension,
+    )
 
 
 @router.get("/{doc_id}/body", response_model=AggregationBodyPreview)

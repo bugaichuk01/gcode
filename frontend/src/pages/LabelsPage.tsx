@@ -3,8 +3,7 @@ import { Link } from "react-router-dom";
 import axios from "axios";
 import PageHeader from "../components/ui/PageHeader";
 import Alert from "../components/ui/Alert";
-import bwipjs from "bwip-js";
-import { Printer, RefreshCw } from "lucide-react";
+import { Eye, Printer, RefreshCw } from "lucide-react";
 import apiClient from "../api/client";
 import { useCisStatusCheck } from "../hooks/useCisStatusCheck";
 import {
@@ -12,7 +11,12 @@ import {
   type CisStatusRowFields,
   formatCisStatusLabel,
 } from "../utils/cisStatus";
-import { fetchGtinProductFields, fetchGtinProductFieldsMap } from "../utils/gtinProductFields";
+import { fetchGtinProductFields, fetchGtinProductFieldsMap, upsertGtinBarcode } from "../utils/gtinProductFields";
+import {
+  extraCatalogFieldsFromFieldCatalog,
+  type ExtraCatalogField,
+} from "../utils/extraFieldsCatalog";
+import type { FieldCatalogItem } from "../labels/blockRegistry";
 import {
   CRYPTO_TAIL_MISSING_LABEL,
   CRYPTO_TAIL_PRINT_ERROR,
@@ -24,6 +28,13 @@ import {
   LABEL_SIZE_PRESETS,
   sizePresetKey,
 } from "../labels/sizePresets";
+import {
+  downloadLabelPdfFile,
+  fetchLabelPdfFiles,
+  fetchLabelPreview,
+  formatPdfFileDate,
+  type LabelPdfFileListItem,
+} from "../labels/labelPdfApi";
 
 type PrintCodeRow = {
   code: string;
@@ -31,8 +42,12 @@ type PrintCodeRow = {
   name: string;
   article: string;
   productSize: string;
+  barcode: string;
   status: string;
 };
+
+type BarcodePrintType = "ean13" | "code128";
+type BarcodeColumnSource = "gtin" | "barcode";
 
 function createPrintCodeRow(code: string): PrintCodeRow {
   const gtinMatch = code.match(/^01(\d{14})/);
@@ -42,6 +57,7 @@ function createPrintCodeRow(code: string): PrintCodeRow {
     name: "",
     article: "",
     productSize: "",
+    barcode: "",
     status: "",
   };
 }
@@ -65,7 +81,7 @@ function applyCisStatusToRows(
 
 function applyProductFieldsToRows(
   rows: PrintCodeRow[],
-  productMap: Record<string, { name: string; article: string; size: string }>,
+  productMap: Record<string, { name: string; article: string; size: string; barcode: string }>,
 ): PrintCodeRow[] {
   return rows.map((row) => {
     const product = row.gtin ? productMap[row.gtin] : undefined;
@@ -77,8 +93,16 @@ function applyProductFieldsToRows(
       name: product.name || row.name,
       article: product.article || row.article,
       productSize: product.size || row.productSize,
+      barcode: product.barcode || row.barcode,
     };
   });
+}
+
+function applyBarcodeToRows(rows: PrintCodeRow[], gtin: string, barcode: string): PrintCodeRow[] {
+  if (!gtin) {
+    return rows;
+  }
+  return rows.map((row) => (row.gtin === gtin ? { ...row, barcode } : row));
 }
 
 function rowMissingLabelFields(row: PrintCodeRow): boolean {
@@ -106,25 +130,6 @@ const LABEL_SIZES: LabelSize[] = LABEL_SIZE_PRESETS.map((preset) => ({
   heightMm: preset.height_mm,
 }));
 
-function generateDataMatrix(canvas: HTMLCanvasElement, code: string): void {
-  bwipjs.toCanvas(canvas, {
-    bcid: "datamatrix",
-    text: code,
-    scale: 3,
-    paddingwidth: 2,
-    paddingheight: 2,
-  });
-}
-
-function clearCanvas(canvas: HTMLCanvasElement): void {
-  const ctx = canvas.getContext("2d");
-  if (ctx) {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-  }
-  canvas.width = 0;
-  canvas.height = 0;
-}
-
 async function parseLabelApiError(err: unknown): Promise<string> {
   if (axios.isAxiosError(err) && err.response?.data instanceof Blob) {
     try {
@@ -143,30 +148,76 @@ async function parseLabelApiError(err: unknown): Promise<string> {
   return CRYPTO_TAIL_PRINT_ERROR;
 }
 
+type PrintLabelResult =
+  | { kind: "inline" }
+  | { kind: "split"; filesCount: number };
+
 async function printLabelPdf(params: {
   codes: string[];
   widthMm: number;
   heightMm: number;
   copies: number;
   templateId?: string;
-}): Promise<void> {
+  startNumber?: number;
+  barcodeType?: BarcodePrintType;
+  barcodeColumn?: string;
+  barcodeKeepLeadingZero?: boolean;
+  barcodeFromExtra?: boolean;
+  splitFiles?: boolean;
+  pagesPerFile?: number;
+  continuousNumbering?: boolean;
+}): Promise<PrintLabelResult> {
+  const startNumber = params.startNumber ?? 1;
+  const splitFiles = params.splitFiles ?? false;
+  const barcodePayload = {
+    barcode_type: params.barcodeType ?? "ean13",
+    barcode_column: params.barcodeColumn ?? "gtin",
+    barcode_keep_leading_zero: params.barcodeKeepLeadingZero ?? true,
+    barcode_from_extra: params.barcodeFromExtra ?? false,
+  };
+  const splitPayload = {
+    split_files: splitFiles,
+    pages_per_file: params.pagesPerFile ?? 100,
+    continuous_numbering: params.continuousNumbering ?? false,
+  };
+  const requestBody = {
+    codes: params.codes,
+    copies: params.copies,
+    start_number: startNumber,
+    ...barcodePayload,
+    ...splitPayload,
+  };
+
+  if (splitFiles) {
+    const response = params.templateId
+      ? await apiClient.post("/labels/pdf/from-template", {
+          template_id: params.templateId,
+          ...requestBody,
+        })
+      : await apiClient.post("/labels/pdf/batch", {
+          width_mm: params.widthMm,
+          height_mm: params.heightMm,
+          ...requestBody,
+        });
+    const filesCount = Array.isArray(response.data?.files) ? response.data.files.length : 0;
+    return { kind: "split", filesCount };
+  }
+
   const response = params.templateId
     ? await apiClient.post(
         "/labels/pdf/from-template",
         {
           template_id: params.templateId,
-          codes: params.codes,
-          copies: params.copies,
+          ...requestBody,
         },
         { responseType: "blob" },
       )
     : await apiClient.post(
         "/labels/pdf/batch",
         {
-          codes: params.codes,
           width_mm: params.widthMm,
           height_mm: params.heightMm,
-          copies: params.copies,
+          ...requestBody,
         },
         { responseType: "blob" },
       );
@@ -178,6 +229,7 @@ async function printLabelPdf(params: {
       win.print();
     };
   }
+  return { kind: "inline" };
 }
 
 export default function LabelsPage() {
@@ -200,19 +252,71 @@ export default function LabelsPage() {
     setError: setStatusCheckError,
   } = useCisStatusCheck();  const [suzCodeOptions, setSuzCodeOptions] = useState<string[]>([]);
   const [codesLoadError, setCodesLoadError] = useState<string | null>(null);
-  const [barcodeError, setBarcodeError] = useState<string | null>(null);
   const [printError, setPrintError] = useState<string | null>(null);
   const [printNotice, setPrintNotice] = useState<string | null>(null);
   const [isPrintingAll, setIsPrintingAll] = useState(false);
   const [copies, setCopies] = useState(1);
+  const [singleFile, setSingleFile] = useState(true);
+  const [splitFiles, setSplitFiles] = useState(false);
+  const [pagesPerFile, setPagesPerFile] = useState(100);
+  const [continuousNumbering, setContinuousNumbering] = useState(false);
+  const [startNumber, setStartNumber] = useState(1);
+  const [barcodeType, setBarcodeType] = useState<BarcodePrintType>("ean13");
+  const [barcodeColumn, setBarcodeColumn] = useState<BarcodeColumnSource>("gtin");
+  const [barcodeKeepLeadingZero, setBarcodeKeepLeadingZero] = useState(true);
+  const [barcodeFromExtra, setBarcodeFromExtra] = useState(false);
+  const [barcodeExtraFieldKey, setBarcodeExtraFieldKey] = useState("");
+  const [extraCatalogFields, setExtraCatalogFields] = useState<ExtraCatalogField[]>([]);
+  const [editingBarcodeCode, setEditingBarcodeCode] = useState<string | null>(null);
+  const [barcodeDraft, setBarcodeDraft] = useState("");
+  const [barcodeSaveError, setBarcodeSaveError] = useState<string | null>(null);
+  const [savingBarcode, setSavingBarcode] = useState(false);
+  const barcodeEditCancelledRef = useRef(false);
   const [templates, setTemplates] = useState<LabelTemplateOption[]>([]);
   const [selectedTemplateId, setSelectedTemplateId] = useState("");
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [pdfFiles, setPdfFiles] = useState<LabelPdfFileListItem[]>([]);
+  const [pdfFilesLoading, setPdfFilesLoading] = useState(false);
+  const [pdfFilesError, setPdfFilesError] = useState<string | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const previewUrlRef = useRef<string | null>(null);
+
+  const loadPdfFiles = useCallback(async () => {
+    setPdfFilesLoading(true);
+    setPdfFilesError(null);
+    try {
+      const files = await fetchLabelPdfFiles();
+      setPdfFiles(files);
+    } catch (err) {
+      console.error("Не удалось загрузить историю PDF:", err);
+      setPdfFilesError("Не удалось загрузить список PDF");
+    } finally {
+      setPdfFilesLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadPdfFiles();
+  }, [loadPdfFiles]);
 
   useEffect(() => {
     apiClient
       .get<LabelTemplateOption[]>("/labels/templates")
       .then((r) => setTemplates(r.data))
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    apiClient
+      .get<FieldCatalogItem[]>("/labels/field-catalog")
+      .then((r) => {
+        const fields = extraCatalogFieldsFromFieldCatalog(r.data);
+        setExtraCatalogFields(fields);
+        if (fields.length > 0) {
+          setBarcodeExtraFieldKey((prev) => prev || fields[0].catalogKey);
+        }
+      })
       .catch(() => {});
   }, []);
 
@@ -297,26 +401,86 @@ export default function LabelsPage() {
     return LABEL_SIZES.find((item) => item.key === sizeKey) ?? LABEL_SIZES[0];
   }, [sizeKey, selectedTemplate]);
 
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
+  const loadPreview = useCallback(async () => {
     const code = markingCode.trim();
     if (!code) {
-      clearCanvas(canvas);
-      setBarcodeError("Введите код маркировки для генерации DataMatrix.");
+      if (previewUrlRef.current) {
+        URL.revokeObjectURL(previewUrlRef.current);
+        previewUrlRef.current = null;
+      }
+      setPreviewUrl(null);
+      setPreviewError("Выберите или введите код маркировки для предпросмотра.");
+      return;
+    }
+    if (!hasCryptoTail(code)) {
+      if (previewUrlRef.current) {
+        URL.revokeObjectURL(previewUrlRef.current);
+        previewUrlRef.current = null;
+      }
+      setPreviewUrl(null);
+      setPreviewError(CRYPTO_TAIL_PRINT_ERROR);
       return;
     }
 
+    setPreviewLoading(true);
+    setPreviewError(null);
     try {
-      generateDataMatrix(canvas, code);
-      setBarcodeError(null);
-    } catch (error) {
-      console.error("Ошибка генерации DataMatrix:", error);
-      clearCanvas(canvas);
-      setBarcodeError("Не удалось сгенерировать DataMatrix. Проверьте корректность кода.");
+      const blob = await fetchLabelPreview({
+        code,
+        templateId: selectedTemplateId || undefined,
+        widthMm: selectedSize.widthMm,
+        heightMm: selectedSize.heightMm,
+        startNumber,
+        barcodeType,
+        barcodeColumn: barcodeFromExtra ? barcodeExtraFieldKey : barcodeColumn,
+        barcodeKeepLeadingZero,
+        barcodeFromExtra,
+      });
+      if (previewUrlRef.current) {
+        URL.revokeObjectURL(previewUrlRef.current);
+      }
+      const url = URL.createObjectURL(blob);
+      previewUrlRef.current = url;
+      setPreviewUrl(url);
+    } catch (err) {
+      console.error("Ошибка предпросмотра:", err);
+      if (previewUrlRef.current) {
+        URL.revokeObjectURL(previewUrlRef.current);
+        previewUrlRef.current = null;
+      }
+      setPreviewUrl(null);
+      setPreviewError(await parseLabelApiError(err));
+    } finally {
+      setPreviewLoading(false);
     }
-  }, [markingCode]);
+  }, [
+    markingCode,
+    selectedTemplateId,
+    selectedSize.widthMm,
+    selectedSize.heightMm,
+    startNumber,
+    barcodeType,
+    barcodeColumn,
+    barcodeKeepLeadingZero,
+    barcodeFromExtra,
+    barcodeExtraFieldKey,
+  ]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void loadPreview();
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [loadPreview]);
+
+  useEffect(
+    () => () => {
+      if (previewUrlRef.current) {
+        URL.revokeObjectURL(previewUrlRef.current);
+      }
+    },
+    [],
+  );
 
   const currentCodeValid = useMemo(
     () => !markingCode.trim() || hasCryptoTail(markingCode),
@@ -364,6 +528,41 @@ export default function LabelsPage() {
     }
   }, [queueWithValidity, selectedQueueCodes.size]);
 
+  const startBarcodeEdit = useCallback((code: string, currentBarcode: string) => {
+    barcodeEditCancelledRef.current = false;
+    setBarcodeSaveError(null);
+    setEditingBarcodeCode(code);
+    setBarcodeDraft(currentBarcode);
+  }, []);
+
+  const cancelBarcodeEdit = useCallback(() => {
+    barcodeEditCancelledRef.current = true;
+    setEditingBarcodeCode(null);
+  }, []);
+
+  const commitBarcodeEdit = useCallback(async (_rowCode: string, gtin: string, value: string) => {
+    if (!gtin || barcodeEditCancelledRef.current) {
+      setEditingBarcodeCode(null);
+      return;
+    }
+    barcodeEditCancelledRef.current = true;
+
+    const trimmed = value.trim();
+    setEditingBarcodeCode(null);
+    setPrintQueue((prev) => applyBarcodeToRows(prev, gtin, trimmed));
+    setSavingBarcode(true);
+    setBarcodeSaveError(null);
+
+    try {
+      await upsertGtinBarcode(gtin, trimmed);
+    } catch (err) {
+      console.error("Не удалось сохранить баркод:", err);
+      setBarcodeSaveError("Не удалось сохранить баркод в доп. полях GTIN.");
+    } finally {
+      setSavingBarcode(false);
+    }
+  }, []);
+
   async function handleCheckQueueStatus() {
     const targetCodes =
       selectedQueueCodes.size > 0
@@ -400,9 +599,65 @@ export default function LabelsPage() {
       if (activeRow.productSize) setProductSize(activeRow.productSize);
     }
   }
-  const invalidQueueCount = queueWithValidity.filter((item) => !item.valid).length;
+  const selectedValidCodes = useMemo(
+    () =>
+      queueWithValidity
+        .filter((row) => row.valid && selectedQueueCodes.has(row.code))
+        .map((row) => row.code),
+    [queueWithValidity, selectedQueueCodes],
+  );
 
-  function prepareCodesForPrint(codes: string[]): string[] | null {    const { printable, rejected } = filterPrintableCodes(codes);
+  const printableQueueCodes = useMemo(
+    () => queueWithValidity.filter((row) => row.valid).map((row) => row.code),
+    [queueWithValidity],
+  );
+
+  function codesForBatchPrint(): string[] {
+    if (selectedValidCodes.length > 0) {
+      return selectedValidCodes;
+    }
+    return printableQueueCodes;
+  }
+
+  const invalidQueueCount = queueWithValidity.filter((item) => !item.valid).length;
+  const batchPrintCodes = codesForBatchPrint();
+  const batchPrintCount = batchPrintCodes.length;
+  const batchPrintUsesSelection = selectedValidCodes.length > 0;
+
+  const barcodePrintOptions = useMemo(
+    () => ({
+      barcodeType,
+      barcodeColumn: barcodeFromExtra ? barcodeExtraFieldKey : barcodeColumn,
+      barcodeKeepLeadingZero,
+      barcodeFromExtra,
+    }),
+    [
+      barcodeType,
+      barcodeColumn,
+      barcodeKeepLeadingZero,
+      barcodeFromExtra,
+      barcodeExtraFieldKey,
+    ],
+  );
+
+  const splitPrintOptions = useMemo(
+    () => ({
+      splitFiles,
+      pagesPerFile,
+      continuousNumbering,
+    }),
+    [splitFiles, pagesPerFile, continuousNumbering],
+  );
+
+  async function handlePrintResult(result: PrintLabelResult) {
+    void loadPdfFiles();
+    if (result.kind === "split") {
+      setPrintNotice(`Создано ${result.filesCount} файлов`);
+    }
+  }
+
+  function prepareCodesForPrint(codes: string[]): string[] | null {
+    const { printable, rejected } = filterPrintableCodes(codes);
     if (rejected.length > 0) {
       setPrintNotice(
         `Исключено ${rejected.length} код(ов) без криптохвоста. ${CRYPTO_TAIL_PRINT_ERROR}`,
@@ -432,13 +687,17 @@ export default function LabelsPage() {
     }
 
     try {
-      await printLabelPdf({
+      const result = await printLabelPdf({
         codes: [code],
         widthMm: selectedSize.widthMm,
         heightMm: selectedSize.heightMm,
         copies,
         templateId: selectedTemplateId || undefined,
+        startNumber: singleFile ? startNumber : 1,
+        ...barcodePrintOptions,
+        ...splitPrintOptions,
       });
+      await handlePrintResult(result);
     } catch (err) {
       console.error("Ошибка генерации PDF:", err);
       setPrintError(await parseLabelApiError(err));
@@ -446,24 +705,28 @@ export default function LabelsPage() {
   }
 
   async function handlePrintAll() {
-    if (printQueue.length <= 1) return;
+    if (batchPrintCount === 0) return;
 
     setIsPrintingAll(true);
     setPrintError(null);
-    const printable = prepareCodesForPrint(printQueue.map((row) => row.code));
+    const printable = prepareCodesForPrint(batchPrintCodes);
     if (!printable) {
       setIsPrintingAll(false);
       return;
     }
 
     try {
-      await printLabelPdf({
+      const result = await printLabelPdf({
         codes: printable,
         widthMm: selectedSize.widthMm,
         heightMm: selectedSize.heightMm,
         copies,
         templateId: selectedTemplateId || undefined,
+        startNumber: singleFile ? startNumber : 1,
+        ...barcodePrintOptions,
+        ...splitPrintOptions,
       });
+      await handlePrintResult(result);
     } catch (err) {
       console.error("Ошибка генерации PDF:", err);
       setPrintError(await parseLabelApiError(err));
@@ -521,6 +784,12 @@ export default function LabelsPage() {
         </Alert>
       ) : null}
 
+      {barcodeSaveError ? (
+        <Alert variant="error" onDismiss={() => setBarcodeSaveError(null)} className="mb-4 print:hidden">
+          {barcodeSaveError}
+        </Alert>
+      ) : null}
+
       {showStatusRefreshWarning ? (
         <Alert variant="warning" className="mb-4 print:hidden">
           Обновите статус кодов перед печатью — без этого поля товара, GTIN и статус ЧЗ могут быть пустыми.
@@ -572,6 +841,7 @@ export default function LabelsPage() {
                 <th>Товар</th>
                 <th>GTIN</th>
                 <th>Артикул</th>
+                <th>Баркод</th>
                 <th>Статус ЧЗ</th>
                 <th>Криптохвост</th>
               </tr>
@@ -596,6 +866,45 @@ export default function LabelsPage() {
                   <td className="max-w-[160px] truncate">{item.name || "—"}</td>
                   <td>{item.gtin || "—"}</td>
                   <td>{item.article || "—"}</td>
+                  <td
+                    className={`max-w-[140px] ${item.gtin ? "cursor-text" : ""}`}
+                    title={item.gtin ? "Двойной клик для редактирования баркода" : undefined}
+                    onDoubleClick={(event) => {
+                      event.stopPropagation();
+                      if (!item.gtin || savingBarcode) {
+                        return;
+                      }
+                      startBarcodeEdit(item.code, item.barcode);
+                    }}
+                  >
+                    {editingBarcodeCode === item.code ? (
+                      <input
+                        autoFocus
+                        type="text"
+                        inputMode="numeric"
+                        value={barcodeDraft}
+                        disabled={savingBarcode}
+                        onChange={(event) => setBarcodeDraft(event.target.value)}
+                        onClick={(event) => event.stopPropagation()}
+                        onBlur={() => {
+                          void commitBarcodeEdit(item.code, item.gtin, barcodeDraft);
+                        }}
+                        onKeyDown={(event) => {
+                          event.stopPropagation();
+                          if (event.key === "Enter") {
+                            event.preventDefault();
+                            void commitBarcodeEdit(item.code, item.gtin, barcodeDraft);
+                          } else if (event.key === "Escape") {
+                            event.preventDefault();
+                            cancelBarcodeEdit();
+                          }
+                        }}
+                        className="w-full rounded border border-blue-400 px-1 py-0.5 font-mono text-xs outline-none"
+                      />
+                    ) : (
+                      <span className="block truncate">{item.barcode || "—"}</span>
+                    )}
+                  </td>
                   <td>
                     {item.status ? (
                       <span
@@ -689,6 +998,150 @@ export default function LabelsPage() {
               className="input-field w-24"
             />
           </div>
+          <div className="space-y-2">
+            <label className="flex items-center gap-2 text-sm text-slate-700">
+              <input
+                type="checkbox"
+                checked={singleFile}
+                onChange={(e) => setSingleFile(e.target.checked)}
+                className="checkbox-field"
+              />
+              Одним файлом
+            </label>
+            {singleFile ? (
+              <div>
+                <label className="label-text" htmlFor="label-start-number">
+                  Нумеровать начиная с
+                </label>
+                <input
+                  id="label-start-number"
+                  type="number"
+                  min={1}
+                  value={startNumber}
+                  onChange={(e) => setStartNumber(Math.max(1, Number(e.target.value) || 1))}
+                  className="input-field w-24"
+                />
+              </div>
+            ) : null}
+            <label className="flex items-center gap-2 text-sm text-slate-700">
+              <input
+                type="checkbox"
+                checked={splitFiles}
+                onChange={(e) => setSplitFiles(e.target.checked)}
+                className="checkbox-field"
+              />
+              Разбивать файл на части
+            </label>
+            {splitFiles ? (
+              <div className="space-y-2 rounded-lg border border-forest-100 bg-white/60 p-3">
+                <div>
+                  <label className="label-text" htmlFor="label-pages-per-file">
+                    Страниц в файле
+                  </label>
+                  <input
+                    id="label-pages-per-file"
+                    type="number"
+                    min={1}
+                    value={pagesPerFile}
+                    onChange={(e) => setPagesPerFile(Math.max(1, Number(e.target.value) || 1))}
+                    className="input-field w-24"
+                  />
+                </div>
+                <label className="flex items-center gap-2 text-sm text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={continuousNumbering}
+                    onChange={(e) => setContinuousNumbering(e.target.checked)}
+                    className="checkbox-field"
+                  />
+                  Сквозная нумерация
+                </label>
+              </div>
+            ) : null}
+          </div>
+
+          <fieldset className="space-y-3 rounded-lg border border-forest-100 bg-forest-50/40 p-3">
+            <legend className="px-1 text-sm font-medium text-forest-900">Баркод</legend>
+            <div>
+              <label className="label-text" htmlFor="barcode-type">
+                Тип штрихкода
+              </label>
+              <select
+                id="barcode-type"
+                value={barcodeType}
+                onChange={(e) => setBarcodeType(e.target.value as BarcodePrintType)}
+                className="select-field"
+              >
+                <option value="code128">Code128</option>
+                <option value="ean13">EAN-13</option>
+              </select>
+            </div>
+            <div>
+              <label className="flex items-center gap-2 text-sm text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={barcodeFromExtra}
+                  onChange={(e) => setBarcodeFromExtra(e.target.checked)}
+                  className="checkbox-field"
+                />
+                Брать из доп. полей
+              </label>
+            </div>
+            {barcodeFromExtra ? (
+              <div>
+                <label className="label-text" htmlFor="barcode-extra-field">
+                  Доп. поле
+                </label>
+                <select
+                  id="barcode-extra-field"
+                  value={barcodeExtraFieldKey}
+                  onChange={(e) => setBarcodeExtraFieldKey(e.target.value)}
+                  className="select-field"
+                  disabled={extraCatalogFields.length === 0}
+                >
+                  {extraCatalogFields.length === 0 ? (
+                    <option value="">Нет доп. полей в каталоге</option>
+                  ) : (
+                    extraCatalogFields.map((field) => (
+                      <option key={field.catalogKey} value={field.catalogKey}>
+                        {field.label}
+                      </option>
+                    ))
+                  )}
+                </select>
+              </div>
+            ) : (
+              <div>
+                <label className="label-text" htmlFor="barcode-column">
+                  Колонка
+                </label>
+                <select
+                  id="barcode-column"
+                  value={barcodeColumn}
+                  onChange={(e) => setBarcodeColumn(e.target.value as BarcodeColumnSource)}
+                  className="select-field"
+                >
+                  <option value="gtin">GTIN</option>
+                  <option value="barcode">Баркод</option>
+                </select>
+              </div>
+            )}
+            <div>
+              <label className="flex items-center gap-2 text-sm text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={barcodeKeepLeadingZero}
+                  onChange={(e) => setBarcodeKeepLeadingZero(e.target.checked)}
+                  className="checkbox-field"
+                />
+                Оставить ведущий 0
+              </label>
+              <p className="mt-1 text-xs text-slate-500">
+                Для EAN-13: если выключено, GTIN-14 с ведущим 0 кодируется как 13 цифр без него.
+              </p>
+            </div>
+          </fieldset>
+
           <div>
             <label className="label-text" htmlFor="label-marking-code">
               Код маркировки (СУЗ / УПД)
@@ -726,6 +1179,15 @@ export default function LabelsPage() {
 
           <div className="flex flex-wrap gap-2 pt-1">
             <button
+              type="button"
+              className="btn-secondary"
+              disabled={previewLoading || !markingCode.trim() || !currentCodeValid}
+              onClick={() => void loadPreview()}
+            >
+              <Eye size={16} />
+              {previewLoading ? "Предпросмотр…" : "Предпросмотр"}
+            </button>
+            <button
               type="submit"
               className="btn-primary"
               disabled={!currentCodeValid || !markingCode.trim()}
@@ -733,61 +1195,98 @@ export default function LabelsPage() {
               <Printer size={16} />
               Печать на принтере
             </button>
-            {printQueue.length > 1 ? (
+            {batchPrintCount > 1 ? (
               <button
                 type="button"
-                disabled={isPrintingAll || invalidQueueCount === printQueue.length}
+                disabled={isPrintingAll || batchPrintCount === 0}
                 onClick={() => void handlePrintAll()}
                 className="btn-secondary"
               >
                 <Printer size={16} />
-                {isPrintingAll ? "Печать…" : `Печать всех (${printQueue.length})`}
+                {isPrintingAll
+                  ? "Печать…"
+                  : batchPrintUsesSelection
+                    ? `Печать выбранных (${batchPrintCount})`
+                    : `Печать всех (${batchPrintCount})`}
               </button>
             ) : null}
           </div>
         </form>
 
-        <section className="card-muted flex min-h-[400px] items-center justify-center p-8 print:min-h-0 print:border-0 print:bg-white print:p-0">
-          <div
-            className="print-area overflow-hidden rounded-xl border border-forest-100 bg-white text-forest-950 shadow-soft print:rounded-none print:border-0 print:shadow-none"
-            style={{
-              width: `${previewWidth}px`,
-              height: `${previewHeight}px`,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              gap: "8px",
-              padding: "8px",
-              boxSizing: "border-box",
-            }}
-          >
-            <div className="flex min-h-0 min-w-0 flex-1 flex-col justify-between text-[10px] leading-tight">
-              <div>
-                <div className="label-name line-clamp-3 font-semibold text-xs">
-                  {name || "Наименование товара"}
-                </div>
-                <div className="label-detail mt-1 text-slate-500">Арт: {article || "-"}</div>
-              </div>
-              <div className="mt-1 space-y-0.5">
-                <div className="label-detail break-all text-slate-500">GTIN: {gtin || "-"}</div>
-                <div className="label-detail break-words text-slate-500">Размер: {productSize || "-"}</div>
-              </div>
-            </div>
-            <div className="relative flex shrink-0 items-center justify-center">
-              <canvas
-                ref={canvasRef}
-                className="max-h-full max-w-full object-contain"
-                aria-label="DataMatrix preview"
-              />
-              {barcodeError ? (
-                <p className="pointer-events-none absolute inset-x-0 bottom-0 text-center text-[9px] leading-snug text-red-600 print:hidden">
-                  {barcodeError}
-                </p>
-              ) : null}
-            </div>
+        <section className="card-muted flex min-h-[400px] flex-col p-6 print:min-h-0 print:border-0 print:bg-white print:p-0">
+          <div className="mb-3 flex items-center justify-between gap-2 print:hidden">
+            <h2 className="text-sm font-semibold text-forest-900">Предпросмотр</h2>
+            {previewLoading ? (
+              <span className="text-xs text-slate-500">Обновление…</span>
+            ) : null}
           </div>
+          <div className="flex flex-1 items-center justify-center">
+            {previewUrl ? (
+              <div
+                className="print-area overflow-hidden rounded-xl border border-forest-100 bg-white shadow-soft print:rounded-none print:border-0 print:shadow-none"
+                style={{
+                  width: `${previewWidth}px`,
+                  height: `${previewHeight}px`,
+                }}
+              >
+                <iframe
+                  src={previewUrl}
+                  title="Предпросмотр этикетки"
+                  className="h-full w-full border-0"
+                />
+              </div>
+            ) : (
+              <div className="max-w-sm text-center text-sm text-slate-500 print:hidden">
+                {previewError ?? "Загрузка предпросмотра…"}
+              </div>
+            )}
+          </div>
+          {previewError && previewUrl ? (
+            <p className="mt-2 text-center text-xs text-red-600 print:hidden">{previewError}</p>
+          ) : null}
         </section>
       </div>
+
+      <section className="card mt-6 p-5 print:hidden">
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <h2 className="text-base font-semibold text-forest-900">Ранее созданные .pdf</h2>
+          <button
+            type="button"
+            onClick={() => void loadPdfFiles()}
+            disabled={pdfFilesLoading}
+            className="btn-sm btn-secondary"
+            title="Обновить список"
+          >
+            <RefreshCw size={14} className={pdfFilesLoading ? "animate-spin" : undefined} />
+            Обновить
+          </button>
+        </div>
+
+        {pdfFilesError ? (
+          <p className="text-sm text-red-600">{pdfFilesError}</p>
+        ) : pdfFilesLoading && pdfFiles.length === 0 ? (
+          <p className="text-sm text-slate-500">Загрузка…</p>
+        ) : pdfFiles.length === 0 ? (
+          <p className="text-sm text-slate-500">Список пуст</p>
+        ) : (
+          <ul className="divide-y divide-forest-100">
+            {pdfFiles.map((file) => (
+              <li key={file.id}>
+                <button
+                  type="button"
+                  onClick={() => void downloadLabelPdfFile(file)}
+                  className="flex w-full items-center justify-between gap-4 py-3 text-left hover:bg-forest-50/60"
+                >
+                  <span className="truncate font-mono text-sm text-forest-900">{file.filename}</span>
+                  <span className="shrink-0 text-xs text-slate-500">
+                    {formatPdfFileDate(file.created_at)} · {file.codes_count} шт.
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
     </div>
   );
 }

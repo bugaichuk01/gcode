@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import apiClient from "../api/client";
 
 import AddBlocksModal, { type AddBlockCreateSpec } from "../labels/AddBlocksModal";
+import { pickImageFile, uploadLabelImage } from "../labels/labelImageApi";
 
 import {
 
@@ -15,6 +16,8 @@ import {
   SCALE,
 
   createElement,
+
+  fieldBlockLabelDefaults,
 
   fieldVariablesFromCatalog,
 
@@ -36,7 +39,12 @@ import {
   sizePresetKey,
 } from "../labels/sizePresets";
 
-import { deriveCopyName } from "../utils/labelTemplate";
+import {
+  createLayoutSnapshot,
+  deriveCopyName,
+  layoutSnapshotsEqual,
+  type LayoutSnapshot,
+} from "../utils/labelTemplate";
 
 
 
@@ -102,6 +110,8 @@ export default function LabelDesignerPage() {
 
   const [addBlocksOpen, setAddBlocksOpen] = useState(false);
 
+  const [savedSnapshot, setSavedSnapshot] = useState<LayoutSnapshot | null>(null);
+
   const canvasRef = useRef<HTMLDivElement>(null);
 
 
@@ -120,6 +130,39 @@ export default function LabelDesignerPage() {
     [fieldCatalog],
 
   );
+
+  const currentSnapshot = useMemo(
+    () => createLayoutSnapshot(templateName, widthMm, heightMm, elements),
+    [templateName, widthMm, heightMm, elements],
+  );
+
+  const isDirty = useMemo(
+    () => savedSnapshot !== null && !layoutSnapshotsEqual(currentSnapshot, savedSnapshot),
+    [currentSnapshot, savedSnapshot],
+  );
+
+  function captureSnapshot(
+    name: string,
+    width: number,
+    height: number,
+    els: LabelElement[],
+  ) {
+    setSavedSnapshot(createLayoutSnapshot(name, width, height, els));
+  }
+
+  function applySnapshot(snapshot: LayoutSnapshot) {
+    setTemplateName(snapshot.name);
+    setWidthMm(snapshot.width_mm);
+    setHeightMm(snapshot.height_mm);
+    setSizeKey(sizePresetKey(snapshot.width_mm, snapshot.height_mm));
+    setElements(
+      snapshot.elements.map((e) => ({
+        ...e,
+        id: e.id || generateId(),
+      })),
+    );
+    setSelectedEl(null);
+  }
 
 
 
@@ -155,6 +198,14 @@ export default function LabelDesignerPage() {
 
   function selectTemplate(t: Template) {
 
+    const normalizedElements = (t.layout_data.elements || []).map((e) => ({
+
+      ...e,
+
+      id: e.id || generateId(),
+
+    }));
+
     setSelected(t);
 
     setTemplateName(t.name);
@@ -165,23 +216,15 @@ export default function LabelDesignerPage() {
 
     setSizeKey(sizePresetKey(t.width_mm, t.height_mm));
 
-    setElements(
-
-      (t.layout_data.elements || []).map((e) => ({
-
-        ...e,
-
-        id: e.id || generateId(),
-
-      })),
-
-    );
+    setElements(normalizedElements);
 
     setSelectedEl(null);
 
     setSuccess(null);
 
     setError(null);
+
+    captureSnapshot(t.name, t.width_mm, t.height_mm, normalizedElements);
 
   }
 
@@ -201,19 +244,26 @@ export default function LabelDesignerPage() {
       sizePresetKey(DEFAULT_SIZE_PRESET.width_mm, DEFAULT_SIZE_PRESET.height_mm),
     );
 
-    setElements(
-      newTemplateElements(
-        DEFAULT_SIZE_PRESET.width_mm,
-        DEFAULT_SIZE_PRESET.height_mm,
-        generateId,
-      ),
+    const initialElements = newTemplateElements(
+      DEFAULT_SIZE_PRESET.width_mm,
+      DEFAULT_SIZE_PRESET.height_mm,
+      generateId,
     );
+
+    setElements(initialElements);
 
     setSelectedEl(null);
 
     setSuccess(null);
 
     setError(null);
+
+    captureSnapshot(
+      "Новый шаблон",
+      DEFAULT_SIZE_PRESET.width_mm,
+      DEFAULT_SIZE_PRESET.height_mm,
+      initialElements,
+    );
 
   }
 
@@ -241,9 +291,23 @@ export default function LabelDesignerPage() {
 
     const baseY = 5;
 
-    const newEls = specs.map((spec, index) =>
+    const newEls = specs.map((spec, index) => {
 
-      createElement(
+      let overrides = spec.overrides;
+
+      if (spec.type === "field" && spec.overrides?.field_key && !spec.overrides?.label) {
+
+        overrides = {
+
+          ...spec.overrides,
+
+          ...fieldBlockLabelDefaults(spec.overrides.field_key, fieldCatalog),
+
+        };
+
+      }
+
+      return createElement(
 
         spec.type,
 
@@ -257,11 +321,11 @@ export default function LabelDesignerPage() {
 
         heightMm,
 
-        spec.overrides,
+        overrides,
 
-      ),
+      );
 
-    );
+    });
 
     setElements((prev) => [...prev, ...newEls]);
 
@@ -270,6 +334,24 @@ export default function LabelDesignerPage() {
       setSelectedEl(newEls[newEls.length - 1].id);
 
     }
+
+    void (async () => {
+      for (let i = 0; i < specs.length; i++) {
+        const spec = specs[i];
+        if (!spec.promptUploadOnAdd || spec.type !== "image") continue;
+        const file = await pickImageFile();
+        if (!file) continue;
+        try {
+          const result = await uploadLabelImage(file);
+          const elId = newEls[i]?.id;
+          if (elId) {
+            updateElement(elId, { image_id: result.id });
+          }
+        } catch {
+          window.alert("Не удалось загрузить изображение");
+        }
+      }
+    })();
 
   }
 
@@ -367,7 +449,7 @@ export default function LabelDesignerPage() {
 
       } else {
 
-        await apiClient.post("/labels/templates", {
+        const res = await apiClient.post<Template>("/labels/templates", {
 
           ...layoutPayload,
 
@@ -377,9 +459,13 @@ export default function LabelDesignerPage() {
 
         });
 
+        setSelected(res.data);
+
       }
 
       setSuccess("Шаблон сохранён");
+
+      captureSnapshot(templateName, widthMm, heightMm, elements);
 
       await loadTemplates();
 
@@ -416,6 +502,104 @@ export default function LabelDesignerPage() {
       setSaving(false);
 
     }
+
+  }
+
+
+
+  async function handleSaveAs() {
+
+    const defaultName = deriveCopyName(templateName.trim() || "Новый шаблон");
+
+    const name = window.prompt("Имя нового шаблона", defaultName);
+
+    if (name === null) return;
+
+    if (!name.trim()) {
+
+      setError("Введите название шаблона");
+
+      return;
+
+    }
+
+    setSaving(true);
+
+    setError(null);
+
+    setSuccess(null);
+
+    try {
+
+      const res = await apiClient.post<Template>("/labels/templates", {
+
+        width_mm: widthMm,
+
+        height_mm: heightMm,
+
+        layout_data: { elements },
+
+        name: name.trim(),
+
+        is_default: false,
+
+      });
+
+      setSuccess("Шаблон сохранён как копия");
+
+      await loadTemplates();
+
+      selectTemplate(res.data);
+
+    } catch (err: unknown) {
+
+      const detail =
+
+        err &&
+
+        typeof err === "object" &&
+
+        "response" in err &&
+
+        err.response &&
+
+        typeof err.response === "object" &&
+
+        "data" in err.response &&
+
+        err.response.data &&
+
+        typeof err.response.data === "object" &&
+
+        "detail" in err.response.data
+
+          ? String(err.response.data.detail)
+
+          : "Ошибка сохранения";
+
+      setError(detail);
+
+    } finally {
+
+      setSaving(false);
+
+    }
+
+  }
+
+
+
+  function handleCancelChanges() {
+
+    if (!savedSnapshot || !isDirty) return;
+
+    if (!confirm("Отменить несохранённые изменения?")) return;
+
+    applySnapshot(savedSnapshot);
+
+    setSuccess(null);
+
+    setError(null);
 
   }
 
@@ -512,6 +696,40 @@ export default function LabelDesignerPage() {
           >
 
             + Новый
+
+          </button>
+
+          {isDirty && (
+
+            <button
+
+              type="button"
+
+              onClick={handleCancelChanges}
+
+              className="px-3 py-1.5 border border-red-300 text-red-600 rounded-lg text-sm hover:bg-red-50"
+
+            >
+
+              Отменить изменения
+
+            </button>
+
+          )}
+
+          <button
+
+            type="button"
+
+            onClick={() => void handleSaveAs()}
+
+            disabled={saving}
+
+            className="px-4 py-1.5 bg-emerald-600 text-white rounded-lg text-sm hover:bg-emerald-700 disabled:opacity-50"
+
+          >
+
+            Сохранить как ...
 
           </button>
 

@@ -15,20 +15,26 @@ from labels.field_catalog import (
     FieldResolveContext,
     field_catalog_metadata,
     resolve_field,
+    resolve_field_block_label,
     substitute_text,
 )
 
 FIELD_CATALOG_URL = "/api/v1/labels/field-catalog"
 
 ORIGINAL_SEVEN_KEYS = {"name", "article", "gtin", "size", "brand", "color", "price"}
-MORE_TAB_FIELD_COUNT = 18
-EXPECTED_CATALOG_SIZE = 14 + MORE_TAB_FIELD_COUNT
+MORE_TAB_FIELD_COUNT = 19
+EXPECTED_CATALOG_SIZE = 15 + MORE_TAB_FIELD_COUNT
 
 
 def test_field_catalog_has_fourteen_label_fields_plus_more_tab():
     assert len(FIELD_CATALOG) == EXPECTED_CATALOG_SIZE
     by_key = {f.key: f.sources for f in FIELD_CATALOG}
     assert by_key["name"] == ("extra_fields.name", "product_card.name")
+    assert by_key["print_name"] == (
+        "extra_fields.extra.print_name",
+        "extra_fields.name",
+        "product_card.name",
+    )
     assert by_key["article"] == ("extra_fields.article", "product_card.model_article")
     assert by_key["gtin"] == ("code.gtin",)
     assert by_key["cis_human"] == ("code.cis_human",)
@@ -41,9 +47,10 @@ def test_field_catalog_has_fourteen_label_fields_plus_more_tab():
     assert by_key["user_product_code"] == ("extra_fields.extra.product_code",)
     assert by_key["user_field_1"] == ("extra_fields.extra.field_1",)
     assert by_key["user_field_10"] == ("extra_fields.extra.field_10",)
+    assert by_key["label_number"] == ("print_context.label_number",)
     label_fields = [f for f in FIELD_CATALOG if f.tab == TAB_LABEL_FIELDS]
     more_fields = [f for f in FIELD_CATALOG if f.tab == TAB_MORE]
-    assert len(label_fields) == 13
+    assert len(label_fields) == 14
     assert len(more_fields) == MORE_TAB_FIELD_COUNT
     assert all(f.tab == TAB_LABEL_FIELDS for f in label_fields)
     cis_human = next(f for f in FIELD_CATALOG if f.key == "cis_human")
@@ -56,13 +63,48 @@ def test_field_catalog_has_fourteen_label_fields_plus_more_tab():
 
 def test_resolve_field_extra_json_keys():
     ef = SimpleNamespace(
-        extra={"phone": "+7900", "field_1": "X", "manufacturer": 12345, "product_code": "TOV-1"},
+        extra={
+            "phone": "+7900",
+            "field_1": "X",
+            "field_1_label": "Артикул поставщика",
+            "manufacturer": 12345,
+            "product_code": "TOV-1",
+        },
     )
     ctx = FieldResolveContext(code="", gtin=None, extra_fields=ef)
     assert resolve_field("user_phone", ctx) == "+7900"
     assert resolve_field("user_field_1", ctx) == "X"
     assert resolve_field("user_manufacturer", ctx) == "12345"
     assert resolve_field("user_product_code", ctx) == "TOV-1"
+
+
+def test_resolve_field_block_label_uses_custom_name():
+    ef = SimpleNamespace(extra={"field_1_label": "Артикул поставщика"})
+    ctx = FieldResolveContext(code="", gtin=None, extra_fields=ef)
+    assert resolve_field_block_label("user_field_1", ctx) == "Артикул поставщика:"
+
+
+def test_resolve_field_block_label_defaults_without_label_key():
+    ef = SimpleNamespace(extra={"field_1": "значение"})
+    ctx = FieldResolveContext(code="", gtin=None, extra_fields=ef)
+    assert resolve_field_block_label("user_field_1", ctx) == "Поле 1:"
+
+
+def test_resolve_field_block_label_non_user_field_returns_none():
+    ctx = FieldResolveContext(code="", gtin=None, extra_fields=None)
+    assert resolve_field_block_label("composition", ctx) is None
+
+
+def test_resolve_field_print_name_fallback_to_name():
+    ef = SimpleNamespace(name="Основное имя", extra={})
+    ctx = FieldResolveContext(code="", gtin=None, extra_fields=ef)
+    assert resolve_field("print_name", ctx) == "Основное имя"
+
+
+def test_resolve_field_print_name_prefers_extra_value():
+    ef = SimpleNamespace(name="Основное имя", extra={"print_name": "Для этикетки"})
+    ctx = FieldResolveContext(code="", gtin=None, extra_fields=ef)
+    assert resolve_field("print_name", ctx) == "Для этикетки"
 
 
 def test_resolve_field_edo_columns():
@@ -257,8 +299,6 @@ def test_pdf_field_resolves_via_catalog():
         "02900004064948",
         None,
         100.0,
-        "Helvetica",
-        "Helvetica-Bold",
         product_card=pc,
     )
     c.drawString.assert_called_once()
@@ -277,8 +317,6 @@ def test_pdf_text_still_substitutes_placeholders():
         "02900004064948",
         None,
         100.0,
-        "Helvetica",
-        "Helvetica-Bold",
     )
     c.drawString.assert_not_called()
 
@@ -291,7 +329,7 @@ def test_unknown_block_type_skipped_without_error(caplog):
     c = MagicMock()
     el = {"type": "unknown_block", "x": 0, "y": 0}
     with caplog.at_level(logging.WARNING):
-        draw_element_from_template(c, el, "code", None, None, 100.0, "Helvetica", "Helvetica-Bold")
+        draw_element_from_template(c, el, "code", None, None, 100.0)
     assert any("Неизвестный тип блока" in r.message for r in caplog.records)
 
 
@@ -313,7 +351,7 @@ def test_field_catalog_items_appear_in_add_blocks_tab():
         modal_fields = [item for item in meta if item["tab"] == TAB_LABEL_FIELDS]
         keys = [item["key"] for item in modal_fields]
         assert "temp_modal_field" in keys
-        assert len(modal_fields) == 14
+        assert len(modal_fields) == 15
     finally:
         fc.FIELD_CATALOG = original
 
@@ -384,6 +422,7 @@ async def test_get_field_catalog_endpoint(client, user_token):
         "model",
         "set_items",
         "cis_human",
+        "print_name",
         "user_inn",
         "user_phone",
         "user_product_code",

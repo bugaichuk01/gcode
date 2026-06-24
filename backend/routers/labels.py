@@ -1,15 +1,15 @@
 import io
 import logging
 import re
+from datetime import datetime, timezone
+from urllib.parse import quote
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import Response
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from reportlab.lib.units import mm
-from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.pdfmetrics import stringWidth
-from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,7 +17,25 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database import get_db_session
 from dependencies import get_current_org, get_current_user
 from labels.block_registry import draw_element_from_template
+from labels.field_catalog import PrintContext
 from labels.field_catalog import field_catalog_metadata
+from labels.font_registry import register_fonts, resolve_font
+from labels.image_service import (
+    load_label_images_cache,
+    read_upload_file,
+    save_label_image,
+    validate_label_image_upload,
+    get_label_image_for_user,
+)
+from labels.pdf_service import (
+    build_label_pdf_filename,
+    build_print_context,
+    delete_label_pdf_file_for_user,
+    get_label_pdf_file_for_user,
+    iter_label_chunks,
+    list_label_pdf_files_for_org,
+    save_label_pdf_file,
+)
 from models import (
     GtinExtraFields,
     LabelTemplate,
@@ -27,32 +45,27 @@ from models import (
     ProductCard,
     User,
 )
-from schemas import LabelTemplateCreate, LabelTemplateResponse
+from schemas import (
+    LabelImageUploadResponse,
+    LabelPdfFileListItem,
+    LabelPdfSplitFileItem,
+    LabelPdfSplitResponse,
+    LabelTemplateCreate,
+    LabelTemplateResponse,
+)
 from services.journal_service import log_operation
 from utils.marking_code import CRYPTO_TAIL_PRINT_ERROR, codes_without_crypto_tail
 
 router = APIRouter(prefix="/labels", tags=["labels"])
 logger = logging.getLogger(__name__)
-_fonts_registered = False
 _DEFAULT_TEMPLATE_MUTATION_ERROR = (
     "Стандартный шаблон нельзя изменить, он сохраняется как новый"
 )
 
 
-def _register_fonts():
-    global _fonts_registered
-    if _fonts_registered:
-        return
-    try:
-        pdfmetrics.registerFont(
-            TTFont("DejaVu", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
-        )
-        pdfmetrics.registerFont(
-            TTFont("DejaVuBold", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
-        )
-        _fonts_registered = True
-    except Exception as e:
-        print(f"Шрифт не найден: {e}")
+def _attachment_disposition(filename: str) -> str:
+    encoded = quote(filename)
+    return f"attachment; filename*=UTF-8''{encoded}"
 
 
 class LabelRequest(BaseModel):
@@ -71,12 +84,41 @@ class BatchLabelRequest(BaseModel):
     height_mm: int = 40
     copies: int = 1
     template_id: str | None = None
+    start_number: int = 1
+    barcode_type: str = "ean13"
+    barcode_column: str = "gtin"
+    barcode_keep_leading_zero: bool = True
+    barcode_from_extra: bool = False
+    split_files: bool = False
+    pages_per_file: int = 100
+    continuous_numbering: bool = False
+    save: bool = True
+
+
+class PreviewLabelRequest(BaseModel):
+    code: str
+    template_id: str | None = None
+    width_mm: int = 58
+    height_mm: int = 40
+    start_number: int = 1
+    barcode_type: str = "ean13"
+    barcode_column: str = "gtin"
+    barcode_keep_leading_zero: bool = True
+    barcode_from_extra: bool = False
 
 
 class PrintFromTemplateRequest(BaseModel):
     template_id: str
     codes: list[str]
     copies: int = 1
+    start_number: int = 1
+    barcode_type: str = "ean13"
+    barcode_column: str = "gtin"
+    barcode_keep_leading_zero: bool = True
+    barcode_from_extra: bool = False
+    split_files: bool = False
+    pages_per_file: int = 100
+    continuous_numbering: bool = False
 
 
 def _extract_gtin(code: str) -> str | None:
@@ -116,8 +158,6 @@ def _draw_label_default(
     ef: GtinExtraFields | None,
     w: float,
     h: float,
-    font_normal: str,
-    font_bold: str,
 ) -> None:
     dm_size = min(h * 0.88, w * 0.44)
     dm_x = w - dm_size - 1 * mm
@@ -138,12 +178,12 @@ def _draw_label_default(
         gtin_clean = m.group(1) if m else ""
 
     if name:
-        c.setFont(font_bold, 5.5)
-        name_truncated = _truncate_text(c, name, font_bold, 5.5, text_area_w)
+        c.setFont(resolve_font(bold=True), 5.5)
+        name_truncated = _truncate_text(c, name, resolve_font(bold=True), 5.5, text_area_w)
         c.drawString(text_x, y, name_truncated)
         y -= 3.5 * mm
 
-    c.setFont(font_normal, 4.5)
+    c.setFont(resolve_font(), 4.5)
     if article:
         c.drawString(text_x, y, f"Арт: {article}"[:20])
         y -= 3 * mm
@@ -164,14 +204,23 @@ def _draw_label_from_template(
     product_card: ProductCard | None,
     layout_data: dict,
     page_h: float,
-    font_normal: str,
-    font_bold: str,
+    image_cache: dict[str, bytes] | None = None,
+    print_context: PrintContext | None = None,
 ) -> None:
     elements = layout_data.get("elements") or []
     for el in elements:
         draw_element_from_template(
-            c, el, code, gtin, ef, page_h, font_normal, font_bold, product_card
+            c, el, code, gtin, ef, page_h, product_card, image_cache, print_context
         )
+
+
+def _build_label_jobs(codes: list[str], copies: int) -> list[tuple[str, str | None]]:
+    jobs: list[tuple[str, str | None]] = []
+    for code in codes:
+        gtin = _extract_gtin(code)
+        for _ in range(copies):
+            jobs.append((code, gtin))
+    return jobs
 
 
 async def _generate_batch_labels_pdf(
@@ -179,8 +228,11 @@ async def _generate_batch_labels_pdf(
     db: AsyncSession,
     org: Organization | None,
     layout_data: dict | None = None,
+    *,
+    save: bool = True,
+    template_id: UUID | None = None,
 ) -> Response:
-    _register_fonts()
+    register_fonts()
     if not data.codes:
         raise HTTPException(status_code=400, detail="Список кодов пуст")
     _reject_codes_without_crypto_tail(data.codes)
@@ -188,16 +240,22 @@ async def _generate_batch_labels_pdf(
         raise HTTPException(status_code=400, detail="Максимум 500 этикеток за один запрос")
     if data.copies < 1 or data.copies > 10:
         raise HTTPException(status_code=400, detail="Количество копий: от 1 до 10")
+    if data.start_number < 1:
+        raise HTTPException(status_code=400, detail="Стартовый номер: от 1")
+    if data.split_files and data.pages_per_file < 1:
+        raise HTTPException(status_code=400, detail="Страниц в файле: от 1")
 
     w = data.width_mm * mm
     h = data.height_mm * mm
-    buf = io.BytesIO()
-    c = canvas.Canvas(buf, pagesize=(w, h))
-    font_normal = "DejaVu" if _fonts_registered else "Helvetica"
-    font_bold = "DejaVuBold" if _fonts_registered else "Helvetica-Bold"
+    label_jobs = _build_label_jobs(data.codes, data.copies)
+    total_pages = len(label_jobs)
+    codes_count = len(data.codes)
 
     extra_fields_cache: dict[str, GtinExtraFields] = {}
     product_card_cache: dict[str, ProductCard] = {}
+    image_cache: dict[str, bytes] = {}
+    if layout_data:
+        image_cache = await load_label_images_cache(db, layout_data, org)
     gtins = list({_extract_gtin(code) for code in data.codes if _extract_gtin(code)})
     if gtins:
         q = select(GtinExtraFields).where(GtinExtraFields.gtin.in_(gtins))
@@ -215,42 +273,124 @@ async def _generate_batch_labels_pdf(
             if pc.gtin:
                 product_card_cache[pc.gtin] = pc
 
-    def draw_label(code: str, gtin: str | None) -> None:
-        ef = extra_fields_cache.get(gtin) if gtin else None
-        product_card = product_card_cache.get(gtin) if gtin else None
-        if layout_data and layout_data.get("elements"):
-            _draw_label_from_template(
-                c, code, gtin, ef, product_card, layout_data, h, font_normal, font_bold
-            )
-        else:
-            _draw_label_default(c, code, gtin, ef, w, h, font_normal, font_bold)
+    def render_chunk_pdf(chunk_start: int, chunk_end: int) -> bytes:
+        buf = io.BytesIO()
+        c = canvas.Canvas(buf, pagesize=(w, h))
+        chunk_len = chunk_end - chunk_start
 
-    total_pages = len(data.codes) * data.copies
-    page_num = 0
-    for code in data.codes:
-        gtin = _extract_gtin(code)
-        for _ in range(data.copies):
-            draw_label(code, gtin)
-            page_num += 1
-            if page_num < total_pages:
+        def draw_label(
+            code: str,
+            gtin: str | None,
+            print_context: PrintContext | None = None,
+        ) -> None:
+            ef = extra_fields_cache.get(gtin) if gtin else None
+            product_card = product_card_cache.get(gtin) if gtin else None
+            if layout_data and layout_data.get("elements"):
+                _draw_label_from_template(
+                    c, code, gtin, ef, product_card, layout_data, h, image_cache, print_context
+                )
+            else:
+                _draw_label_default(c, code, gtin, ef, w, h)
+
+        for local_i, global_index in enumerate(range(chunk_start, chunk_end)):
+            code, gtin = label_jobs[global_index]
+            print_context = build_print_context(
+                global_index=global_index,
+                chunk_start=chunk_start,
+                chunk_len=chunk_len,
+                total_pages=total_pages,
+                start_number=data.start_number,
+                continuous_numbering=data.continuous_numbering,
+                barcode_type=data.barcode_type,
+                barcode_column=data.barcode_column,
+                barcode_keep_leading_zero=data.barcode_keep_leading_zero,
+                barcode_from_extra=data.barcode_from_extra,
+            )
+            draw_label(code, gtin, print_context)
+            if local_i < chunk_len - 1:
                 c.showPage()
                 c.setPageSize((w, h))
 
-    c.save()
-    buf.seek(0)
-    await log_operation(
-        db,
-        operation_type=OperationLogType.LABEL_PRINTED,
-        status=OperationLogStatus.SUCCESS,
-        description=f"Напечатано {len(data.codes)} этикеток",
-        codes_count=len(data.codes),
-        org_id=org.id if org else None,
-    )
-    filename = f"labels_{len(data.codes)}pcs.pdf"
+        c.save()
+        buf.seek(0)
+        return buf.read()
+
+    resolved_template_id = template_id
+    if resolved_template_id is None and data.template_id:
+        try:
+            resolved_template_id = UUID(data.template_id)
+        except (ValueError, TypeError):
+            resolved_template_id = None
+
+    if data.split_files:
+        chunks = iter_label_chunks(total_pages, data.pages_per_file)
+        now = datetime.now(timezone.utc)
+        saved_files: list[LabelPdfSplitFileItem] = []
+
+        for part_index, (chunk_start, chunk_end) in enumerate(chunks, start=1):
+            pdf_bytes = render_chunk_pdf(chunk_start, chunk_end)
+            chunk_pages = chunk_end - chunk_start
+            filename = build_label_pdf_filename(
+                chunk_pages,
+                pdf_bytes,
+                now=now,
+                part_index=part_index if len(chunks) > 1 else None,
+            )
+            if save:
+                record = await save_label_pdf_file(
+                    db,
+                    pdf_bytes,
+                    org,
+                    pages_count=chunk_pages,
+                    codes_count=chunk_pages,
+                    template_id=resolved_template_id,
+                    filename=filename,
+                )
+                saved_files.append(
+                    LabelPdfSplitFileItem(
+                        id=record.id,
+                        filename=record.filename,
+                        pages_count=record.pages_count,
+                    )
+                )
+
+        if save:
+            await log_operation(
+                db,
+                operation_type=OperationLogType.LABEL_PRINTED,
+                status=OperationLogStatus.SUCCESS,
+                description=f"Напечатано {codes_count} этикеток ({len(chunks)} файлов)",
+                codes_count=codes_count,
+                org_id=org.id if org else None,
+            )
+        payload = LabelPdfSplitResponse(files=saved_files)
+        return JSONResponse(content=payload.model_dump(mode="json"))
+
+    pdf_bytes = render_chunk_pdf(0, total_pages)
+    if save:
+        await save_label_pdf_file(
+            db,
+            pdf_bytes,
+            org,
+            pages_count=total_pages,
+            codes_count=codes_count,
+            template_id=resolved_template_id,
+        )
+
+    if save:
+        await log_operation(
+            db,
+            operation_type=OperationLogType.LABEL_PRINTED,
+            status=OperationLogStatus.SUCCESS,
+            description=f"Напечатано {codes_count} этикеток",
+            codes_count=codes_count,
+            org_id=org.id if org else None,
+        )
+    inline_filename = f"labels_{codes_count}pcs.pdf"
     return Response(
-        content=buf.read(),
+        content=pdf_bytes,
         media_type="application/pdf",
-        headers={"Content-Disposition": f"inline; filename={filename}"},
+        headers={"Content-Disposition": f"inline; filename={inline_filename}"},
     )
 
 
@@ -266,6 +406,84 @@ async def get_field_catalog(
 ) -> list[dict[str, str]]:
     """Каталог полей (плейсхолдеров) для конструктора этикеток."""
     return field_catalog_metadata()
+
+
+@router.post("/images", response_model=LabelImageUploadResponse, status_code=201)
+async def upload_label_image(
+    file: UploadFile = File(...),
+    _: User = Depends(get_current_user),
+    org: Organization | None = Depends(get_current_org),
+    db: AsyncSession = Depends(get_db_session),
+) -> LabelImageUploadResponse:
+    """Загрузить изображение для блока «Изображение» в конструкторе."""
+    content = await read_upload_file(file)
+    mime = validate_label_image_upload(content, file.content_type)
+    image = await save_label_image(
+        db,
+        content,
+        mime,
+        org,
+        filename=file.filename,
+    )
+    return LabelImageUploadResponse(id=image.id, mime=image.mime)
+
+
+@router.get("/images/{image_id}")
+async def get_label_image(
+    image_id: UUID,
+    _: User = Depends(get_current_user),
+    org: Organization | None = Depends(get_current_org),
+    db: AsyncSession = Depends(get_db_session),
+) -> Response:
+    """Отдать бинарь загруженного изображения (с проверкой org)."""
+    image = await get_label_image_for_user(db, image_id, org)
+    return Response(
+        content=bytes(image.data),
+        media_type=image.mime,
+        headers={
+            "Cache-Control": "public, max-age=31536000, immutable",
+        },
+    )
+
+
+@router.get("/pdf-files", response_model=list[LabelPdfFileListItem])
+async def list_label_pdf_files(
+    _: User = Depends(get_current_user),
+    org: Organization | None = Depends(get_current_org),
+    db: AsyncSession = Depends(get_db_session),
+) -> list[LabelPdfFileListItem]:
+    """Список ранее созданных PDF этикеток для текущей организации."""
+    files = await list_label_pdf_files_for_org(db, org)
+    return files
+
+
+@router.get("/pdf-files/{file_id}")
+async def get_label_pdf_file(
+    file_id: UUID,
+    _: User = Depends(get_current_user),
+    org: Organization | None = Depends(get_current_org),
+    db: AsyncSession = Depends(get_db_session),
+) -> Response:
+    """Скачать сохранённый PDF (org-изоляция)."""
+    pdf_file = await get_label_pdf_file_for_user(db, file_id, org)
+    return Response(
+        content=bytes(pdf_file.data),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": _attachment_disposition(pdf_file.filename),
+        },
+    )
+
+
+@router.delete("/pdf-files/{file_id}", status_code=204)
+async def delete_label_pdf_file(
+    file_id: UUID,
+    _: User = Depends(get_current_user),
+    org: Organization | None = Depends(get_current_org),
+    db: AsyncSession = Depends(get_db_session),
+) -> None:
+    """Удалить PDF из истории (org-изоляция)."""
+    await delete_label_pdf_file_for_user(db, file_id, org)
 
 
 @router.get("/templates", response_model=list[LabelTemplateResponse])
@@ -370,10 +588,21 @@ async def print_from_template(
             width_mm=template.width_mm,
             height_mm=template.height_mm,
             copies=data.copies,
+            start_number=data.start_number,
+            barcode_type=data.barcode_type,
+            barcode_column=data.barcode_column,
+            barcode_keep_leading_zero=data.barcode_keep_leading_zero,
+            barcode_from_extra=data.barcode_from_extra,
+            split_files=data.split_files,
+            pages_per_file=data.pages_per_file,
+            continuous_numbering=data.continuous_numbering,
+            save=True,
         ),
         db=db,
         org=org,
         layout_data=template.layout_data,
+        template_id=template.id,
+        save=True,
     )
 
 
@@ -382,20 +611,18 @@ async def generate_label_pdf(
     data: LabelRequest,
     _: User = Depends(get_current_user),
 ):
-    _register_fonts()
+    register_fonts()
     buf = io.BytesIO()
     w = data.width_mm * mm
     h = data.height_mm * mm
     c = canvas.Canvas(buf, pagesize=(w, h))
-    font_normal = "DejaVu" if _fonts_registered else "Helvetica"
-    font_bold = "DejaVuBold" if _fonts_registered else "Helvetica-Bold"
     text_x = 2 * mm
     y = h - 4 * mm
     if data.name:
-        c.setFont(font_bold, 5.5)
+        c.setFont(resolve_font(bold=True), 5.5)
         c.drawString(text_x, y, data.name[:25])
         y -= 3.5 * mm
-    c.setFont(font_normal, 4.5)
+    c.setFont(resolve_font(), 4.5)
     if data.article:
         c.drawString(text_x, y, f"Арт: {data.article}")
         y -= 3 * mm
@@ -437,4 +664,58 @@ async def generate_batch_labels_pdf(
                     "height_mm": template.height_mm,
                 }
             )
-    return await _generate_batch_labels_pdf(data, db, org, layout_data=layout_data)
+    return await _generate_batch_labels_pdf(
+        data,
+        db,
+        org,
+        layout_data=layout_data,
+        template_id=UUID(data.template_id) if data.template_id else None,
+        save=data.save,
+    )
+
+
+@router.post("/pdf/preview")
+async def preview_label_pdf(
+    data: PreviewLabelRequest,
+    _: User = Depends(get_current_user),
+    org: Organization | None = Depends(get_current_org),
+    db: AsyncSession = Depends(get_db_session),
+) -> Response:
+    """Предпросмотр одной этикетки — тот же рендер, что и печать, без сохранения в историю."""
+    code = data.code.strip()
+    if not code:
+        raise HTTPException(status_code=400, detail="Укажите код маркировки")
+
+    layout_data: dict | None = None
+    template_id: UUID | None = None
+    width_mm = data.width_mm
+    height_mm = data.height_mm
+
+    if data.template_id:
+        template = await db.get(LabelTemplate, UUID(data.template_id))
+        if not template:
+            raise HTTPException(status_code=404, detail="Шаблон не найден")
+        layout_data = template.layout_data
+        template_id = template.id
+        width_mm = template.width_mm
+        height_mm = template.height_mm
+
+    return await _generate_batch_labels_pdf(
+        data=BatchLabelRequest(
+            codes=[code],
+            width_mm=width_mm,
+            height_mm=height_mm,
+            copies=1,
+            barcode_type=data.barcode_type,
+            barcode_column=data.barcode_column,
+            barcode_keep_leading_zero=data.barcode_keep_leading_zero,
+            barcode_from_extra=data.barcode_from_extra,
+            start_number=data.start_number,
+            save=False,
+        ),
+        db=db,
+        org=org,
+        layout_data=layout_data,
+        template_id=template_id,
+        save=False,
+    )

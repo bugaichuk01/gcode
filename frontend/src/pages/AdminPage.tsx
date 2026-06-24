@@ -511,15 +511,12 @@ function AdminUsers() {
 function AdminOrganizations() {
   const [orgs, setOrgs] = useState<any[]>([]);
   const [search, setSearch] = useState("");
-  const [loading, setLoading] = useState(true);
 
   async function load() {
-    setLoading(true);
     const params: any = {};
     if (search) params.search = search;
     const res = await apiClient.get("/admin/organizations", { params });
     setOrgs(res.data.items);
-    setLoading(false);
   }
 
   useEffect(() => { load(); }, []);

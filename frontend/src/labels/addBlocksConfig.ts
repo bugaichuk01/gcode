@@ -1,4 +1,5 @@
-import type { BlockType, FieldCatalogItem, LabelElement } from "./blockRegistry";
+import type { BlockType, CreateElementOverrides, FieldCatalogItem } from "./blockRegistry";
+import { SIGN_REGISTRY, signSvgUrl } from "./signRegistry";
 
 export const ADD_BLOCKS_TAB_ORDER = [
   "Поля этикетки",
@@ -12,7 +13,11 @@ export type AddBlocksTab = (typeof ADD_BLOCKS_TAB_ORDER)[number];
 /** Вкладки, список блоков которых строится из field_catalog (filter by tab). */
 export const CATALOG_SOURCED_TABS: Partial<Record<AddBlocksTab, string>> = {
   "Поля этикетки": "Поля этикетки",
+  "Ещё": "Ещё",
 };
+
+/** Вкладки: примитивы из STATIC_ADD_BLOCK_ENTRIES + поля из каталога. */
+export const HYBRID_CATALOG_TABS = new Set<AddBlocksTab>(["Ещё"]);
 
 export interface StaticAddBlockEntry {
   tab: AddBlocksTab;
@@ -20,10 +25,12 @@ export interface StaticAddBlockEntry {
   label: string;
   icon?: string;
   blockType?: BlockType;
-  overrides?: Partial<LabelElement>;
+  overrides?: CreateElementOverrides;
   disabled?: boolean;
   placeholder?: boolean;
   hint?: string;
+  /** При добавлении блока сразу открыть диалог загрузки файла. */
+  promptUploadOnAdd?: boolean;
 }
 
 /** Примитивы и заглушки модала — единый конфиг (поля этикетки приходят из каталога). */
@@ -68,14 +75,6 @@ export const STATIC_ADD_BLOCK_ENTRIES: StaticAddBlockEntry[] = [
     hint: "скоро",
   },
   {
-    tab: "Знаки",
-    id: "signs-placeholder",
-    label: "Знаки сертификации (РСТ, ЕАС, CE)",
-    disabled: true,
-    placeholder: true,
-    hint: "скоро",
-  },
-  {
     tab: "Ещё",
     id: "more-text",
     label: "Произвольный текст",
@@ -84,49 +83,27 @@ export const STATIC_ADD_BLOCK_ENTRIES: StaticAddBlockEntry[] = [
   },
   {
     tab: "Ещё",
-    id: "more-line",
-    label: "Линия",
-    blockType: "line",
-    icon: "—",
-  },
-  {
-    tab: "Ещё",
-    id: "more-barcode",
-    label: "EAN-13",
-    blockType: "barcode_ean13",
-    icon: "▓",
-  },
-  {
-    tab: "Ещё",
     id: "more-image",
     label: "Изображение",
-    disabled: true,
-    placeholder: true,
-    hint: "скоро",
-  },
-  {
-    tab: "Ещё",
-    id: "more-label-num",
-    label: "Номер этикетки",
-    disabled: true,
-    placeholder: true,
-    hint: "скоро",
+    blockType: "image",
+    icon: "🖼",
+    promptUploadOnAdd: true,
   },
   {
     tab: "Ещё",
     id: "more-line-h",
     label: "Горизонтальная линия",
-    disabled: true,
-    placeholder: true,
-    hint: "скоро",
+    blockType: "line",
+    overrides: { linePreset: "horizontal" },
+    icon: "—",
   },
   {
     tab: "Ещё",
     id: "more-line-v",
     label: "Вертикальная линия",
-    disabled: true,
-    placeholder: true,
-    hint: "скоро",
+    blockType: "line",
+    overrides: { linePreset: "vertical" },
+    icon: "|",
   },
 ];
 
@@ -135,28 +112,27 @@ export interface AddBlockSelectableItem {
   label: string;
   example?: string;
   icon?: string;
+  previewSrc?: string;
   disabled?: boolean;
   placeholder?: boolean;
   hint?: string;
-  createSpec?: { type: BlockType; overrides?: Partial<LabelElement> };
+  createSpec?: { type: BlockType; overrides?: CreateElementOverrides };
+  promptUploadOnAdd?: boolean;
 }
 
-export function getAddBlockItemsForTab(
-  tab: AddBlocksTab,
-  catalog: FieldCatalogItem[],
-): AddBlockSelectableItem[] {
-  const catalogTab = CATALOG_SOURCED_TABS[tab];
-  if (catalogTab) {
-    return catalog
-      .filter((f) => f.tab === catalogTab)
-      .map((f) => ({
-        id: `field:${f.key}`,
-        label: f.label,
-        example: f.example,
-        createSpec: { type: "field" as BlockType, overrides: { field_key: f.key } },
-      }));
-  }
+function signItemsForTab(): AddBlockSelectableItem[] {
+  return SIGN_REGISTRY.map((sign) => ({
+    id: `sign:${sign.key}`,
+    label: sign.label,
+    previewSrc: signSvgUrl(sign.asset),
+    createSpec: {
+      type: "sign" as BlockType,
+      overrides: { sign_key: sign.key },
+    },
+  }));
+}
 
+function staticItemsForTab(tab: AddBlocksTab): AddBlockSelectableItem[] {
   return STATIC_ADD_BLOCK_ENTRIES.filter((e) => e.tab === tab).map((e) => ({
     id: e.id,
     label: e.label,
@@ -167,5 +143,43 @@ export function getAddBlockItemsForTab(
     createSpec: e.blockType
       ? { type: e.blockType, overrides: e.overrides }
       : undefined,
+    promptUploadOnAdd: e.promptUploadOnAdd,
   }));
+}
+
+function catalogItemsForTab(
+  catalog: FieldCatalogItem[],
+  catalogTab: string,
+): AddBlockSelectableItem[] {
+  return catalog
+    .filter((f) => f.tab === catalogTab)
+    .map((f) => ({
+      id: `field:${f.key}`,
+      label: f.label,
+      example: f.example,
+      createSpec: {
+        type: "field" as BlockType,
+        overrides: {
+          field_key: f.key,
+          label: { show: true, text: `${f.label}:`, inline: false },
+        },
+      },
+    }));
+}
+
+export function getAddBlockItemsForTab(
+  tab: AddBlocksTab,
+  catalog: FieldCatalogItem[],
+): AddBlockSelectableItem[] {
+  if (tab === "Знаки") {
+    return signItemsForTab();
+  }
+  const catalogTab = CATALOG_SOURCED_TABS[tab];
+  if (catalogTab && HYBRID_CATALOG_TABS.has(tab)) {
+    return [...staticItemsForTab(tab), ...catalogItemsForTab(catalog, catalogTab)];
+  }
+  if (catalogTab) {
+    return catalogItemsForTab(catalog, catalogTab);
+  }
+  return staticItemsForTab(tab);
 }

@@ -2,7 +2,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from enum import StrEnum
-from sqlalchemy import JSON, Boolean, DateTime, Enum, Float, ForeignKey, Integer, String, Text, Uuid, func
+from sqlalchemy import JSON, Boolean, DateTime, Enum, Float, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from database import Base
 class ProductCardType(StrEnum):
@@ -392,6 +392,40 @@ class GtinExtraFields(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
+
+
+class ExtraFieldsTemplate(Base):
+    __tablename__ = "extra_fields_templates"
+    __table_args__ = (
+        UniqueConstraint("org_id", "name", name="uq_extra_fields_templates_org_name"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    fields: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    org_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
 class UtilisationStatus(StrEnum):
     DRAFT = "draft"
     PENDING = "pending"
@@ -489,6 +523,7 @@ class AggregationDocument(Base):
     kitu_code: Mapped[str] = mapped_column(String(72), nullable=False)
     product_group: Mapped[str] = mapped_column(String(64), nullable=False, default="perfumery")
     marking_codes: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    units_capacity: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[AggregationStatus] = mapped_column(
         Enum(
             AggregationStatus,
@@ -644,6 +679,60 @@ class OperationLog(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+class LabelPdfFile(Base):
+    """Сохранённый PDF пакетной печати этикеток."""
+
+    __tablename__ = "label_pdf_files"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    org_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    pages_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    codes_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    template_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("label_templates.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class LabelImage(Base):
+    """Загруженное изображение для блока «Изображение» в конструкторе этикеток."""
+
+    __tablename__ = "label_images"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    org_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    mime: Mapped[str] = mapped_column(String(64), nullable=False)
+    data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class LabelTemplate(Base):
     __tablename__ = "label_templates"
     id: Mapped[uuid.UUID] = mapped_column(

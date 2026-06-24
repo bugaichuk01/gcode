@@ -31,6 +31,16 @@ const operationsPaths = [
 
 const homePaths = ["/", "/dashboard"];
 
+function isNavItemActive(itemPath: string, pathname: string): boolean {
+  if (itemPath === "/operations") {
+    return operationsPaths.includes(pathname);
+  }
+  if (itemPath === "/") {
+    return homePaths.includes(pathname);
+  }
+  return pathname === itemPath;
+}
+
 const primaryNav = [
   { path: "/", label: "Главная", icon: LayoutDashboard, shortLabel: "Главная" },
   { path: "/catalog", label: "Национальный каталог", icon: Layers, shortLabel: "Каталог" },
@@ -166,18 +176,12 @@ export default function Layout() {
           </p>
           {primaryNav.map((item) => {
             const Icon = item.icon;
+            const active = isNavItemActive(item.path, location.pathname);
             return (
               <NavLink
                 key={item.path}
                 to={item.path}
-                className={navLinkClass}
-                isActive={(_, location) =>
-                  item.path === "/operations"
-                    ? operationsPaths.includes(location.pathname)
-                    : item.path === "/"
-                      ? homePaths.includes(location.pathname)
-                      : location.pathname === item.path
-                }
+                className={active ? "nav-link-active" : "nav-link"}
               >
                 <Icon className="h-[18px] w-[18px] shrink-0" aria-hidden="true" />
                 <span>{item.label}</span>
@@ -236,12 +240,7 @@ export default function Layout() {
           <div className="flex items-stretch justify-around px-1 pb-[env(safe-area-inset-bottom)]">
             {primaryNav.map((item) => {
               const Icon = item.icon;
-              const active =
-                item.path === "/operations"
-                  ? operationsPaths.includes(location.pathname)
-                  : item.path === "/"
-                    ? homePaths.includes(location.pathname)
-                    : location.pathname === item.path;
+              const active = isNavItemActive(item.path, location.pathname);
               return (
                 <NavLink
                   key={item.path}

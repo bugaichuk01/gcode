@@ -8,11 +8,12 @@ import {
   type AddBlocksTab,
   getAddBlockItemsForTab,
 } from "./addBlocksConfig";
-import type { BlockType, FieldCatalogItem, LabelElement } from "./blockRegistry";
+import type { BlockType, CreateElementOverrides, FieldCatalogItem } from "./blockRegistry";
 
 export interface AddBlockCreateSpec {
   type: BlockType;
-  overrides?: Partial<LabelElement>;
+  overrides?: CreateElementOverrides;
+  promptUploadOnAdd?: boolean;
 }
 
 interface AddBlocksModalProps {
@@ -83,9 +84,14 @@ export default function AddBlocksModal({
   }
 
   function handleAdd() {
-    const specs = selectedItems
-      .map((item) => item.createSpec)
-      .filter((spec): spec is AddBlockCreateSpec => Boolean(spec));
+    const specs: AddBlockCreateSpec[] = [];
+    for (const item of selectedItems) {
+      if (!item.createSpec) continue;
+      specs.push({
+        ...item.createSpec,
+        promptUploadOnAdd: item.promptUploadOnAdd,
+      });
+    }
     if (specs.length === 0) return;
     onAdd(specs);
     onClose();
@@ -159,7 +165,13 @@ export default function AddBlocksModal({
                               : "text-slate-700 hover:bg-slate-50"
                         }`}
                       >
-                        {item.icon ? (
+                        {item.previewSrc ? (
+                          <img
+                            src={item.previewSrc}
+                            alt=""
+                            className="h-8 w-8 shrink-0 rounded border border-slate-200 bg-white object-contain p-0.5"
+                          />
+                        ) : item.icon ? (
                           <span className="w-5 shrink-0 text-center text-xs">{item.icon}</span>
                         ) : null}
                         <span className="min-w-0 flex-1">
