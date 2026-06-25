@@ -32,7 +32,9 @@ import {
   downloadLabelPdfFile,
   fetchLabelPdfFiles,
   fetchLabelPreview,
+  fetchSsccLabelPreview,
   formatPdfFileDate,
+  printSsccLabelPdf,
   type LabelPdfFileListItem,
 } from "../labels/labelPdfApi";
 
@@ -232,7 +234,13 @@ async function printLabelPdf(params: {
   return { kind: "inline" };
 }
 
+const SSCC_SIZE_KEY = sizePresetKey(40, 20);
+
 export default function LabelsPage() {
+  const [ssccPrintMode, setSsccPrintMode] = useState(false);
+  const [ssccQueue, setSsccQueue] = useState<string[]>([]);
+  const [selectedSsccCodes, setSelectedSsccCodes] = useState<Set<string>>(new Set());
+  const [activeKituCode, setActiveKituCode] = useState("");
   const [sizeKey, setSizeKey] = useState(
     sizePresetKey(DEFAULT_SIZE_PRESET.width_mm, DEFAULT_SIZE_PRESET.height_mm),
   );
@@ -321,6 +329,21 @@ export default function LabelsPage() {
   }, []);
 
   useEffect(() => {
+    const storedSscc = sessionStorage.getItem("ssccPrintCodes");
+    if (storedSscc) {
+      const codes = JSON.parse(storedSscc) as string[];
+      if (codes.length > 0) {
+        setSsccPrintMode(true);
+        setSsccQueue(codes);
+        setSelectedSsccCodes(new Set(codes));
+        setActiveKituCode(codes[0]);
+        setSizeKey(SSCC_SIZE_KEY);
+      }
+      sessionStorage.removeItem("ssccPrintCodes");
+      sessionStorage.removeItem("ssccPrintMode");
+      return;
+    }
+
     const stored = sessionStorage.getItem("printCodes");
     if (stored) {
       const codes = JSON.parse(stored) as string[];
@@ -332,6 +355,16 @@ export default function LabelsPage() {
       sessionStorage.removeItem("printCodes");
     }
   }, []);
+  useEffect(() => {
+    if (!ssccPrintMode || templates.length === 0) {
+      return;
+    }
+    const ssccTemplate = templates.find((t) => t.name.toLowerCase().includes("sscc"));
+    if (ssccTemplate) {
+      setSelectedTemplateId(ssccTemplate.id);
+    }
+  }, [ssccPrintMode, templates]);
+
   useEffect(() => {
     let cancelled = false;
     async function loadCodes() {
@@ -402,6 +435,57 @@ export default function LabelsPage() {
   }, [sizeKey, selectedTemplate]);
 
   const loadPreview = useCallback(async () => {
+    if (ssccPrintMode) {
+      const kitu = activeKituCode.trim();
+      if (!kitu) {
+        if (previewUrlRef.current) {
+          URL.revokeObjectURL(previewUrlRef.current);
+          previewUrlRef.current = null;
+        }
+        setPreviewUrl(null);
+        setPreviewError("Выберите или введите код КИТУ (SSCC) для предпросмотра.");
+        return;
+      }
+      if (!/^\d{18}$/.test(kitu)) {
+        if (previewUrlRef.current) {
+          URL.revokeObjectURL(previewUrlRef.current);
+          previewUrlRef.current = null;
+        }
+        setPreviewUrl(null);
+        setPreviewError("КИТУ должен быть 18-значным SSCC (только цифры).");
+        return;
+      }
+
+      setPreviewLoading(true);
+      setPreviewError(null);
+      try {
+        const blob = await fetchSsccLabelPreview({
+          kituCode: kitu,
+          templateId: selectedTemplateId || undefined,
+          widthMm: selectedSize.widthMm,
+          heightMm: selectedSize.heightMm,
+          startNumber,
+        });
+        if (previewUrlRef.current) {
+          URL.revokeObjectURL(previewUrlRef.current);
+        }
+        const url = URL.createObjectURL(blob);
+        previewUrlRef.current = url;
+        setPreviewUrl(url);
+      } catch (err) {
+        console.error("Ошибка предпросмотра SSCC:", err);
+        if (previewUrlRef.current) {
+          URL.revokeObjectURL(previewUrlRef.current);
+          previewUrlRef.current = null;
+        }
+        setPreviewUrl(null);
+        setPreviewError(await parseLabelApiError(err));
+      } finally {
+        setPreviewLoading(false);
+      }
+      return;
+    }
+
     const code = markingCode.trim();
     if (!code) {
       if (previewUrlRef.current) {
@@ -454,6 +538,8 @@ export default function LabelsPage() {
       setPreviewLoading(false);
     }
   }, [
+    ssccPrintMode,
+    activeKituCode,
     markingCode,
     selectedTemplateId,
     selectedSize.widthMm,
@@ -480,6 +566,11 @@ export default function LabelsPage() {
       }
     },
     [],
+  );
+
+  const currentKituValid = useMemo(
+    () => !activeKituCode.trim() || /^\d{18}$/.test(activeKituCode.trim()),
+    [activeKituCode],
   );
 
   const currentCodeValid = useMemo(
@@ -612,6 +703,21 @@ export default function LabelsPage() {
     [queueWithValidity],
   );
 
+  const selectedSsccList = useMemo(
+    () => ssccQueue.filter((code) => selectedSsccCodes.has(code)),
+    [ssccQueue, selectedSsccCodes],
+  );
+
+  const ssccCodesForBatchPrint = useMemo(() => {
+    if (selectedSsccList.length > 0) {
+      return selectedSsccList;
+    }
+    return ssccQueue;
+  }, [selectedSsccList, ssccQueue]);
+
+  const ssccBatchCount = ssccCodesForBatchPrint.length;
+  const ssccBatchUsesSelection = selectedSsccList.length > 0;
+
   function codesForBatchPrint(): string[] {
     if (selectedValidCodes.length > 0) {
       return selectedValidCodes;
@@ -676,6 +782,35 @@ export default function LabelsPage() {
     event.preventDefault();
     setPrintError(null);
 
+    if (ssccPrintMode) {
+      const kitu = activeKituCode.trim();
+      if (!kitu) {
+        setPrintError("Введите код КИТУ (SSCC)");
+        return;
+      }
+      if (!/^\d{18}$/.test(kitu)) {
+        setPrintError("КИТУ должен быть 18-значным SSCC (только цифры).");
+        return;
+      }
+
+      try {
+        const result = await printSsccLabelPdf({
+          kituCodes: [kitu],
+          widthMm: selectedSize.widthMm,
+          heightMm: selectedSize.heightMm,
+          copies,
+          templateId: selectedTemplateId || undefined,
+          startNumber: singleFile ? startNumber : 1,
+          ...splitPrintOptions,
+        });
+        await handlePrintResult(result);
+      } catch (err) {
+        console.error("Ошибка генерации PDF SSCC:", err);
+        setPrintError(await parseLabelApiError(err));
+      }
+      return;
+    }
+
     const code = markingCode.trim();
     if (!code) {
       setPrintError("Введите код маркировки");
@@ -705,6 +840,31 @@ export default function LabelsPage() {
   }
 
   async function handlePrintAll() {
+    if (ssccPrintMode) {
+      if (ssccBatchCount === 0) return;
+
+      setIsPrintingAll(true);
+      setPrintError(null);
+      try {
+        const result = await printSsccLabelPdf({
+          kituCodes: ssccCodesForBatchPrint,
+          widthMm: selectedSize.widthMm,
+          heightMm: selectedSize.heightMm,
+          copies,
+          templateId: selectedTemplateId || undefined,
+          startNumber: singleFile ? startNumber : 1,
+          ...splitPrintOptions,
+        });
+        await handlePrintResult(result);
+      } catch (err) {
+        console.error("Ошибка генерации PDF SSCC:", err);
+        setPrintError(await parseLabelApiError(err));
+      } finally {
+        setIsPrintingAll(false);
+      }
+      return;
+    }
+
     if (batchPrintCount === 0) return;
 
     setIsPrintingAll(true);
@@ -743,18 +903,55 @@ export default function LabelsPage() {
     <div className="page-container print:space-y-0 print:p-0">
       <PageHeader
         title="Печать этикеток"
-        description="Настройте шаблон, проверьте предпросмотр и отправьте этикетку в печать."
+        description={
+          ssccPrintMode
+            ? "Режим печати SSCC: штрихкод Code128 по коду КИТУ и макет для транспортной упаковки."
+            : "Настройте шаблон, проверьте предпросмотр и отправьте этикетку в печать."
+        }
         compact
       />
 
-      {printQueue.length > 1 && (
+      <div className="mb-4 flex flex-wrap items-center gap-3 print:hidden">
+        <label className="flex items-center gap-2 text-sm text-slate-700">
+          <input
+            type="checkbox"
+            checked={ssccPrintMode}
+            onChange={(e) => {
+              const enabled = e.target.checked;
+              setSsccPrintMode(enabled);
+              if (enabled) {
+                setSizeKey(SSCC_SIZE_KEY);
+                const ssccTemplate = templates.find((t) => t.name.toLowerCase().includes("sscc"));
+                if (ssccTemplate) {
+                  setSelectedTemplateId(ssccTemplate.id);
+                }
+              }
+            }}
+            className="checkbox-field"
+          />
+          Печать SSCC (КИТУ)
+        </label>
+        {ssccPrintMode ? (
+          <span className="text-xs text-sage-500">
+            Штрихкод Code128 по коду КИТУ, без проверки криптохвоста
+          </span>
+        ) : null}
+      </div>
+
+      {ssccPrintMode && ssccQueue.length > 1 ? (
+        <Alert variant="warning" className="mb-6 print:hidden">
+          В очереди SSCC: {ssccQueue.length} кодов КИТУ
+        </Alert>
+      ) : null}
+
+      {printQueue.length > 1 && !ssccPrintMode ? (
         <Alert variant="warning" className="mb-6 print:hidden">
           В очереди печати: {printQueue.length} кодов
           {invalidQueueCount > 0
             ? ` (${invalidQueueCount} без криптохвоста — будут исключены при печати)`
             : ""}
         </Alert>
-      )}
+      ) : null}
 
       {printNotice ? (
         <Alert variant="warning" onDismiss={() => setPrintNotice(null)} className="mb-4 print:hidden">
@@ -790,13 +987,67 @@ export default function LabelsPage() {
         </Alert>
       ) : null}
 
-      {showStatusRefreshWarning ? (
+      {showStatusRefreshWarning && !ssccPrintMode ? (
         <Alert variant="warning" className="mb-4 print:hidden">
           Обновите статус кодов перед печатью — без этого поля товара, GTIN и статус ЧЗ могут быть пустыми.
         </Alert>
       ) : null}
 
-      {printQueue.length > 0 ? (
+      {ssccPrintMode && ssccQueue.length > 0 ? (
+        <div className="table-container mb-6 print:hidden">
+          <table className="table-base">
+            <thead>
+              <tr>
+                <th className="w-10">
+                  <input
+                    type="checkbox"
+                    checked={
+                      selectedSsccCodes.size === ssccQueue.length && ssccQueue.length > 0
+                    }
+                    onChange={() => {
+                      if (selectedSsccCodes.size === ssccQueue.length) {
+                        setSelectedSsccCodes(new Set());
+                      } else {
+                        setSelectedSsccCodes(new Set(ssccQueue));
+                      }
+                    }}
+                    className="checkbox-field"
+                  />
+                </th>
+                <th>КИТУ (SSCC)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {ssccQueue.map((kitu) => (
+                <tr
+                  key={kitu}
+                  className="cursor-pointer hover:bg-forest-50/50"
+                  onClick={() => setActiveKituCode(kitu)}
+                >
+                  <td onClick={(event) => event.stopPropagation()}>
+                    <input
+                      type="checkbox"
+                      checked={selectedSsccCodes.has(kitu)}
+                      onChange={() => {
+                        setSelectedSsccCodes((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(kitu)) next.delete(kitu);
+                          else next.add(kitu);
+                          return next;
+                        });
+                      }}
+                      className="checkbox-field"
+                    />
+                  </td>
+                  <td className="font-mono text-xs">{kitu}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+
+      {printQueue.length > 0 && !ssccPrintMode ? (
         <div className="mb-4 flex flex-wrap items-center gap-2 print:hidden">
           <button
             type="button"
@@ -821,7 +1072,7 @@ export default function LabelsPage() {
         </div>
       ) : null}
 
-      {printQueue.length > 0 ? (
+      {printQueue.length > 0 && !ssccPrintMode ? (
         <div className="table-container mb-6 print:hidden">
           <table className="table-base">
             <thead>
@@ -980,10 +1231,34 @@ export default function LabelsPage() {
             </div>
           )}
 
-          <InputField id="label-name" label="Наименование товара" value={name} onChange={setName} />
-          <InputField id="label-article" label="Артикул" value={article} onChange={setArticle} />
-          <InputField id="label-gtin" label="GTIN" value={gtin} onChange={setGtin} />
-          <InputField id="label-product-size" label="Размер" value={productSize} onChange={setProductSize} />
+          {!ssccPrintMode ? (
+            <>
+              <InputField id="label-name" label="Наименование товара" value={name} onChange={setName} />
+              <InputField id="label-article" label="Артикул" value={article} onChange={setArticle} />
+              <InputField id="label-gtin" label="GTIN" value={gtin} onChange={setGtin} />
+              <InputField id="label-product-size" label="Размер" value={productSize} onChange={setProductSize} />
+            </>
+          ) : (
+            <div>
+              <label className="label-text" htmlFor="label-kitu-code">
+                КИТУ / SSCC
+              </label>
+              <input
+                id="label-kitu-code"
+                type="text"
+                inputMode="numeric"
+                value={activeKituCode}
+                onChange={(event) =>
+                  setActiveKituCode(event.target.value.replace(/\D/g, "").slice(0, 18))
+                }
+                placeholder="460000000123456789"
+                className="input-field font-mono"
+              />
+              {!currentKituValid ? (
+                <p className="mt-1 text-xs text-red-600">КИТУ должен быть 18 цифр</p>
+              ) : null}
+            </div>
+          )}
           <div>
             <label className="label-text" htmlFor="label-copies">
               Количество копий
@@ -1060,6 +1335,7 @@ export default function LabelsPage() {
             ) : null}
           </div>
 
+          {!ssccPrintMode ? (
           <fieldset className="space-y-3 rounded-lg border border-forest-100 bg-forest-50/40 p-3">
             <legend className="px-1 text-sm font-medium text-forest-900">Баркод</legend>
             <div>
@@ -1141,7 +1417,14 @@ export default function LabelsPage() {
               </p>
             </div>
           </fieldset>
+          ) : (
+            <p className="rounded-lg border border-forest-100 bg-forest-50/40 p-3 text-sm text-sage-600">
+              Штрихкод: Code128 по коду КИТУ (источник <code className="text-xs">kitu_code</code>).
+              Настройте макет в конструкторе — поле «SSCC / КИТУ».
+            </p>
+          )}
 
+          {!ssccPrintMode ? (
           <div>
             <label className="label-text" htmlFor="label-marking-code">
               Код маркировки (СУЗ / УПД)
@@ -1176,12 +1459,18 @@ export default function LabelsPage() {
               </p>
             ) : null}
           </div>
+          ) : null}
 
           <div className="flex flex-wrap gap-2 pt-1">
             <button
               type="button"
               className="btn-secondary"
-              disabled={previewLoading || !markingCode.trim() || !currentCodeValid}
+              disabled={
+                previewLoading ||
+                (ssccPrintMode
+                  ? !activeKituCode.trim() || !currentKituValid
+                  : !markingCode.trim() || !currentCodeValid)
+              }
               onClick={() => void loadPreview()}
             >
               <Eye size={16} />
@@ -1190,24 +1479,35 @@ export default function LabelsPage() {
             <button
               type="submit"
               className="btn-primary"
-              disabled={!currentCodeValid || !markingCode.trim()}
+              disabled={
+                ssccPrintMode
+                  ? !currentKituValid || !activeKituCode.trim()
+                  : !currentCodeValid || !markingCode.trim()
+              }
             >
               <Printer size={16} />
-              Печать на принтере
+              {ssccPrintMode ? "Печать SSCC" : "Печать на принтере"}
             </button>
-            {batchPrintCount > 1 ? (
+            {(ssccPrintMode ? ssccBatchCount > 1 : batchPrintCount > 1) ? (
               <button
                 type="button"
-                disabled={isPrintingAll || batchPrintCount === 0}
+                disabled={
+                  isPrintingAll ||
+                  (ssccPrintMode ? ssccBatchCount === 0 : batchPrintCount === 0)
+                }
                 onClick={() => void handlePrintAll()}
                 className="btn-secondary"
               >
                 <Printer size={16} />
                 {isPrintingAll
                   ? "Печать…"
-                  : batchPrintUsesSelection
-                    ? `Печать выбранных (${batchPrintCount})`
-                    : `Печать всех (${batchPrintCount})`}
+                  : ssccPrintMode
+                    ? ssccBatchUsesSelection
+                      ? `Печать выбранных (${ssccBatchCount})`
+                      : `Печать всех (${ssccBatchCount})`
+                    : batchPrintUsesSelection
+                      ? `Печать выбранных (${batchPrintCount})`
+                      : `Печать всех (${batchPrintCount})`}
               </button>
             ) : null}
           </div>

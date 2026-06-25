@@ -22,8 +22,8 @@ from labels.field_catalog import (
 FIELD_CATALOG_URL = "/api/v1/labels/field-catalog"
 
 ORIGINAL_SEVEN_KEYS = {"name", "article", "gtin", "size", "brand", "color", "price"}
-MORE_TAB_FIELD_COUNT = 19
-EXPECTED_CATALOG_SIZE = 15 + MORE_TAB_FIELD_COUNT
+MORE_TAB_FIELD_COUNT = 21
+EXPECTED_CATALOG_SIZE = 16 + MORE_TAB_FIELD_COUNT
 
 
 def test_field_catalog_has_fourteen_label_fields_plus_more_tab():
@@ -38,6 +38,7 @@ def test_field_catalog_has_fourteen_label_fields_plus_more_tab():
     assert by_key["article"] == ("extra_fields.article", "product_card.model_article")
     assert by_key["gtin"] == ("code.gtin",)
     assert by_key["cis_human"] == ("code.cis_human",)
+    assert by_key["kitu_code"] == ("print_context.kitu_code", "code.kitu")
     assert by_key["price"] == ("empty",)
     assert by_key["gender"] == ("product_card.gender",)
     assert by_key["set_items"] == ("product_card.set_items",)
@@ -48,6 +49,8 @@ def test_field_catalog_has_fourteen_label_fields_plus_more_tab():
     assert by_key["user_field_1"] == ("extra_fields.extra.field_1",)
     assert by_key["user_field_10"] == ("extra_fields.extra.field_10",)
     assert by_key["label_number"] == ("print_context.label_number",)
+    assert by_key["package_number"] == ("print_context.kitu_index",)
+    assert by_key["labels_in_kitu"] == ("print_context.labels_in_kitu",)
     label_fields = [f for f in FIELD_CATALOG if f.tab == TAB_LABEL_FIELDS]
     more_fields = [f for f in FIELD_CATALOG if f.tab == TAB_MORE]
     assert len(label_fields) == 14
@@ -422,6 +425,7 @@ async def test_get_field_catalog_endpoint(client, user_token):
         "model",
         "set_items",
         "cis_human",
+        "kitu_code",
         "print_name",
         "user_inn",
         "user_phone",

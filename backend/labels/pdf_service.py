@@ -40,6 +40,7 @@ def build_print_context(
     barcode_column: str = "gtin",
     barcode_keep_leading_zero: bool = True,
     barcode_from_extra: bool = False,
+    kitu_code: str = "",
 ) -> PrintContext:
     """Контекст нумерации для одной страницы.
 
@@ -65,6 +66,7 @@ def build_print_context(
         barcode_column=barcode_column,
         barcode_keep_leading_zero=barcode_keep_leading_zero,
         barcode_from_extra=barcode_from_extra,
+        kitu_code=kitu_code,
     )
 
 

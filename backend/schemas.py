@@ -661,17 +661,52 @@ class IntroduceOstRequest(BaseModel):
 class IntroduceOstBodyPreview(BaseModel):
     body: str
     body_b64: str
+
+
+class IntroduceGoodsBodyRequest(BaseModel):
+    marking_codes: list[str]
+    product_group: str = "perfumery"
+    production_date: str | None = None
+    default_tnved_code: str | None = None
+    fill_tnved_from_cards: bool = False
+    fill_certificate_from_cards: bool = False
+
+
+class IntroduceGoodsRequest(BaseModel):
+    marking_codes: list[str]
+    product_group: str = "perfumery"
+    production_date: str | None = None
+    default_tnved_code: str | None = None
+    fill_tnved_from_cards: bool = False
+    fill_certificate_from_cards: bool = False
+    signature: str = Field(..., min_length=1)
+
+
+class IntroduceGoodsBodyPreview(BaseModel):
+    body: str
+    body_b64: str
+
+
 class AggregationStatus(StrEnum):
     DRAFT = "draft"
     PENDING = "pending"
     ACCEPTED = "accepted"
     REJECTED = "rejected"
     ERROR = "error"
+
+
+class AggregationType(StrEnum):
+    KITU = "AGGREGATION"
+    SET = "SETS_AGGREGATION"
+
+
 class AggregationDocumentCreate(BaseModel):
     marking_codes: list[str]
     product_group: str = "perfumery"
     kitu_code: str | None = None
     units_capacity: int | None = None
+    aggregation_type: AggregationType = AggregationType.KITU
+    product_card_id: UUID | None = None
 class AggregationSendRequest(BaseModel):
     signature: str
 class AggregationDocumentResponse(BaseModel):
@@ -682,6 +717,8 @@ class AggregationDocumentResponse(BaseModel):
     marking_codes: list[str]
     status: AggregationStatus
     units_capacity: int | None
+    aggregation_type: str = "AGGREGATION"
+    product_card_id: UUID | None = None
     document_id: str | None
     error_message: str | None
     created_at: datetime
@@ -717,6 +754,26 @@ class KituBatchGenerateResponse(BaseModel):
     items: list[KituBatchItem]
     gcp: str
     extension: int
+
+
+class KituUniquenessCheckRequest(BaseModel):
+    kitu_codes: list[str] = Field(..., min_length=1, max_length=5000)
+    product_group: str = "perfumery"
+
+
+class KituUniquenessResultItem(BaseModel):
+    kitu_code: str
+    status: str  # unique | exists | error
+    detail: str | None = None
+
+
+class KituUniquenessCheckResponse(BaseModel):
+    results: list[KituUniquenessResultItem]
+    total: int
+    unique_count: int
+    exists_count: int
+    error_count: int
+
 class UpdCreateRequest(BaseModel):
     document_number: str = Field(..., min_length=1, max_length=128)
     marking_codes: list[str] = Field(default_factory=list)

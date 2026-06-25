@@ -12,6 +12,7 @@ export const LABEL_SIZE_PRESETS: LabelSizePreset[] = [
   { width_mm: 16, height_mm: 16, label: "16×16" },
   { width_mm: 20, height_mm: 20, label: "20×20" },
   { width_mm: 20, height_mm: 22, label: "20×22" },
+  { width_mm: 40, height_mm: 20, label: "40×20" },
   { width_mm: 43, height_mm: 25, label: "43×25" },
   { width_mm: 58, height_mm: 40, label: "58×40" },
   { width_mm: 60, height_mm: 40, label: "60×40" },

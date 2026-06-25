@@ -73,6 +73,28 @@ def test_resolve_barcode_from_catalog_extra_field_code128():
     )
 
 
+def test_resolve_barcode_kitu_code_column():
+    ctx = FieldResolveContext(
+        code="460000000123456789",
+        gtin=None,
+        extra_fields=None,
+        print_context=PrintContext(
+            label_index=0,
+            label_number=1,
+            total=1,
+            kitu_code="460000000123456789",
+        ),
+    )
+    assert (
+        resolve_barcode_value(
+            ctx,
+            barcode_type="code128",
+            barcode_column="kitu_code",
+        )
+        == "460000000123456789"
+    )
+
+
 def test_resolve_barcode_empty_returns_none():
     ctx = FieldResolveContext(code="", gtin=None, extra_fields=None)
     assert resolve_barcode_value(ctx) is None

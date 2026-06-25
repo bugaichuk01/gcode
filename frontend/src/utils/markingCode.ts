@@ -81,3 +81,9 @@ export function filterPrintableCodes(codes: string[]): {
 }
 
 export const CRYPTO_TAIL_MISSING_LABEL = "без криптохвоста — печать недоступна";
+
+/** Извлечь GTIN (14 цифр) из начала КМ (AI 01). */
+export function extractGtinFromMarkingCode(code: string): string {
+  const match = (code || "").trim().match(/^01(\d{14})/);
+  return match?.[1] ?? "";
+}

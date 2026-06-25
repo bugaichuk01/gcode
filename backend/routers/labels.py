@@ -16,6 +16,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db_session
 from dependencies import get_current_org, get_current_user
+from labels.aggregation_pdf_service import (
+    build_aggregation_page_jobs,
+    generate_aggregation_labels_pdf,
+    resolve_aggregation_print_groups,
+)
+from labels.aggregation_system_barcodes_pdf import build_aggregation_system_barcodes_pdf
 from labels.block_registry import draw_element_from_template
 from labels.field_catalog import PrintContext
 from labels.field_catalog import field_catalog_metadata
@@ -93,6 +99,49 @@ class BatchLabelRequest(BaseModel):
     pages_per_file: int = 100
     continuous_numbering: bool = False
     save: bool = True
+    label_kind: str = "km"  # km | sscc
+
+
+class SsccBatchLabelRequest(BaseModel):
+    """Пакетная печать этикеток SSCC (КИТУ) — без проверки криптохвоста."""
+
+    kitu_codes: list[str]
+    width_mm: int = 40
+    height_mm: int = 20
+    copies: int = 1
+    template_id: str | None = None
+    start_number: int = 1
+    split_files: bool = False
+    pages_per_file: int = 100
+    continuous_numbering: bool = False
+    save: bool = True
+
+
+class SsccPreviewLabelRequest(BaseModel):
+    kitu_code: str
+    template_id: str | None = None
+    width_mm: int = 40
+    height_mm: int = 20
+    start_number: int = 1
+
+
+class AggregationLabelRequest(BaseModel):
+    """Последовательная печать КИТУ + вложений (два макета, один PDF)."""
+
+    doc_ids: list[str] | None = None
+    kitu_codes: list[str] | None = None
+    kitu_template_id: str
+    unit_template_id: str
+    start_number: int = 1
+    barcode_type: str = "ean13"
+    barcode_column: str = "gtin"
+    barcode_keep_leading_zero: bool = True
+    barcode_from_extra: bool = False
+    split_files: bool = False
+    pages_per_file: int = 100
+    continuous_numbering: bool = False
+    save: bool = True
+    single_file: bool = True
 
 
 class PreviewLabelRequest(BaseModel):
@@ -214,6 +263,26 @@ def _draw_label_from_template(
         )
 
 
+def _draw_aggregation_label_page(
+    c: canvas.Canvas,
+    code: str,
+    gtin: str | None,
+    ef: GtinExtraFields | None,
+    product_card: ProductCard | None,
+    layout_data: dict | None,
+    page_h: float,
+    page_w: float,
+    image_cache: dict[str, bytes] | None,
+    print_context: PrintContext | None,
+) -> None:
+    if layout_data and layout_data.get("elements"):
+        _draw_label_from_template(
+            c, code, gtin, ef, product_card, layout_data, page_h, image_cache, print_context
+        )
+    else:
+        _draw_label_default(c, code, gtin, ef, page_w, page_h)
+
+
 def _build_label_jobs(codes: list[str], copies: int) -> list[tuple[str, str | None]]:
     jobs: list[tuple[str, str | None]] = []
     for code in codes:
@@ -235,7 +304,10 @@ async def _generate_batch_labels_pdf(
     register_fonts()
     if not data.codes:
         raise HTTPException(status_code=400, detail="Список кодов пуст")
-    _reject_codes_without_crypto_tail(data.codes)
+    if data.label_kind == "sscc":
+        _validate_kitu_codes(data.codes)
+    else:
+        _reject_codes_without_crypto_tail(data.codes)
     if len(data.codes) > 500:
         raise HTTPException(status_code=400, detail="Максимум 500 этикеток за один запрос")
     if data.copies < 1 or data.copies > 10:
@@ -257,7 +329,7 @@ async def _generate_batch_labels_pdf(
     if layout_data:
         image_cache = await load_label_images_cache(db, layout_data, org)
     gtins = list({_extract_gtin(code) for code in data.codes if _extract_gtin(code)})
-    if gtins:
+    if gtins and data.label_kind != "sscc":
         q = select(GtinExtraFields).where(GtinExtraFields.gtin.in_(gtins))
         if org:
             q = q.where(GtinExtraFields.org_id == org.id)
@@ -294,6 +366,17 @@ async def _generate_batch_labels_pdf(
 
         for local_i, global_index in enumerate(range(chunk_start, chunk_end)):
             code, gtin = label_jobs[global_index]
+            sscc_defaults = (
+                {
+                    "barcode_type": "code128",
+                    "barcode_column": "kitu_code",
+                }
+                if data.label_kind == "sscc"
+                else {
+                    "barcode_type": data.barcode_type,
+                    "barcode_column": data.barcode_column,
+                }
+            )
             print_context = build_print_context(
                 global_index=global_index,
                 chunk_start=chunk_start,
@@ -301,10 +384,10 @@ async def _generate_batch_labels_pdf(
                 total_pages=total_pages,
                 start_number=data.start_number,
                 continuous_numbering=data.continuous_numbering,
-                barcode_type=data.barcode_type,
-                barcode_column=data.barcode_column,
                 barcode_keep_leading_zero=data.barcode_keep_leading_zero,
                 barcode_from_extra=data.barcode_from_extra,
+                kitu_code=code if data.label_kind == "sscc" else "",
+                **sscc_defaults,
             )
             draw_label(code, gtin, print_context)
             if local_i < chunk_len - 1:
@@ -394,10 +477,43 @@ async def _generate_batch_labels_pdf(
     )
 
 
+async def _resolve_sscc_template(
+    db: AsyncSession,
+    template_id: UUID | None,
+    layout_data: dict | None,
+    width_mm: int,
+    height_mm: int,
+) -> tuple[dict | None, int, int, UUID | None]:
+    """Подставить шаблон SSCC 40×20, если макет не задан."""
+    if layout_data is not None:
+        return layout_data, width_mm, height_mm, template_id
+
+    result = await db.scalars(
+        select(LabelTemplate).where(LabelTemplate.name == "SSCC 40×20мм").limit(1)
+    )
+    template = result.first()
+    if template is None:
+        return layout_data, width_mm, height_mm, template_id
+    return template.layout_data, template.width_mm, template.height_mm, template.id
+
+
 def _reject_codes_without_crypto_tail(codes: list[str]) -> None:
     invalid = codes_without_crypto_tail(codes)
     if invalid:
         raise HTTPException(status_code=400, detail=CRYPTO_TAIL_PRINT_ERROR)
+
+
+def _validate_kitu_codes(codes: list[str]) -> None:
+    invalid: list[str] = []
+    for code in codes:
+        stripped = code.strip()
+        if len(stripped) != 18 or not stripped.isdigit():
+            invalid.append(code)
+    if invalid:
+        raise HTTPException(
+            status_code=400,
+            detail="КИТУ должен быть 18-значным SSCC (только цифры)",
+        )
 
 
 @router.get("/field-catalog")
@@ -672,6 +788,226 @@ async def generate_batch_labels_pdf(
         template_id=UUID(data.template_id) if data.template_id else None,
         save=data.save,
     )
+
+
+@router.post("/pdf/sscc")
+async def generate_sscc_labels_pdf(
+    data: SsccBatchLabelRequest,
+    _: User = Depends(get_current_user),
+    org: Organization | None = Depends(get_current_org),
+    db: AsyncSession = Depends(get_db_session),
+) -> Response:
+    """Печать этикеток SSCC (КИТУ): Code128 по kitu_code, без проверки криптохвоста."""
+    layout_data: dict | None = None
+    width_mm = data.width_mm
+    height_mm = data.height_mm
+    resolved_template_id: UUID | None = None
+    if data.template_id:
+        template = await db.get(LabelTemplate, UUID(data.template_id))
+        if template:
+            layout_data = template.layout_data
+            width_mm = template.width_mm
+            height_mm = template.height_mm
+            resolved_template_id = template.id
+
+    layout_data, width_mm, height_mm, resolved_template_id = await _resolve_sscc_template(
+        db,
+        resolved_template_id,
+        layout_data,
+        width_mm,
+        height_mm,
+    )
+
+    batch = BatchLabelRequest(
+        codes=[c.strip() for c in data.kitu_codes],
+        width_mm=width_mm,
+        height_mm=height_mm,
+        copies=data.copies,
+        template_id=data.template_id,
+        start_number=data.start_number,
+        barcode_type="code128",
+        barcode_column="kitu_code",
+        split_files=data.split_files,
+        pages_per_file=data.pages_per_file,
+        continuous_numbering=data.continuous_numbering,
+        save=data.save,
+        label_kind="sscc",
+    )
+    return await _generate_batch_labels_pdf(
+        batch,
+        db,
+        org,
+        layout_data=layout_data,
+        template_id=resolved_template_id,
+        save=data.save,
+    )
+
+
+@router.post("/pdf/sscc/preview")
+async def preview_sscc_label_pdf(
+    data: SsccPreviewLabelRequest,
+    _: User = Depends(get_current_user),
+    org: Organization | None = Depends(get_current_org),
+    db: AsyncSession = Depends(get_db_session),
+) -> Response:
+    """Предпросмотр одной SSCC-этикетки без сохранения в историю."""
+    kitu_code = data.kitu_code.strip()
+    if not kitu_code:
+        raise HTTPException(status_code=400, detail="Укажите код КИТУ (SSCC)")
+
+    layout_data: dict | None = None
+    template_id: UUID | None = None
+    width_mm = data.width_mm
+    height_mm = data.height_mm
+
+    if data.template_id:
+        template = await db.get(LabelTemplate, UUID(data.template_id))
+        if not template:
+            raise HTTPException(status_code=404, detail="Шаблон не найден")
+        layout_data = template.layout_data
+        template_id = template.id
+        width_mm = template.width_mm
+        height_mm = template.height_mm
+
+    layout_data, width_mm, height_mm, template_id = await _resolve_sscc_template(
+        db,
+        template_id,
+        layout_data,
+        width_mm,
+        height_mm,
+    )
+
+    return await _generate_batch_labels_pdf(
+        data=BatchLabelRequest(
+            codes=[kitu_code],
+            width_mm=width_mm,
+            height_mm=height_mm,
+            copies=1,
+            barcode_type="code128",
+            barcode_column="kitu_code",
+            start_number=data.start_number,
+            save=False,
+            label_kind="sscc",
+        ),
+        db=db,
+        org=org,
+        layout_data=layout_data,
+        template_id=template_id,
+        save=False,
+    )
+
+
+@router.get("/pdf/aggregation-system-barcodes")
+async def download_aggregation_system_barcodes_pdf(
+    _: User = Depends(get_current_user),
+) -> Response:
+    """PDF с системными штрихкодами СТАРТ (AGGR_ST) и КОНЕЦ (AGGR_FN) для печати на рабочем месте."""
+    pdf_bytes = build_aggregation_system_barcodes_pdf()
+    filename = "aggregation_system_barcodes.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": _attachment_disposition(filename)},
+    )
+
+
+@router.post("/pdf/aggregation")
+async def generate_aggregation_labels_pdf_endpoint(
+    data: AggregationLabelRequest,
+    _: User = Depends(get_current_user),
+    org: Organization | None = Depends(get_current_org),
+    db: AsyncSession = Depends(get_db_session),
+) -> Response:
+    """Последовательная печать: КИТУ (макет упаковки) + вложения (макет КМ) одним PDF."""
+    if data.split_files and not data.single_file:
+        raise HTTPException(
+            status_code=400,
+            detail="Разбивка на части недоступна без режима «одним файлом»",
+        )
+
+    try:
+        kitu_tpl_id = UUID(data.kitu_template_id)
+        unit_tpl_id = UUID(data.unit_template_id)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail="Некорректный идентификатор шаблона") from exc
+
+    kitu_template = await _load_aggregation_template(db, kitu_tpl_id, label="упаковки")
+    unit_template = await _load_aggregation_template(db, unit_tpl_id, label="вложений")
+
+    doc_ids: list[UUID] | None = None
+    if data.doc_ids:
+        try:
+            doc_ids = [UUID(value) for value in data.doc_ids]
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail="Некорректный doc_id") from exc
+
+    groups = await resolve_aggregation_print_groups(
+        db,
+        org,
+        doc_ids=doc_ids,
+        kitu_codes=data.kitu_codes,
+    )
+
+    jobs = build_aggregation_page_jobs(
+        groups,
+        kitu_layout=kitu_template.layout_data,
+        kitu_width_mm=kitu_template.width_mm,
+        kitu_height_mm=kitu_template.height_mm,
+        unit_layout=unit_template.layout_data,
+        unit_width_mm=unit_template.width_mm,
+        unit_height_mm=unit_template.height_mm,
+        unit_barcode_type=data.barcode_type,
+        unit_barcode_column=data.barcode_column,
+        unit_barcode_keep_leading_zero=data.barcode_keep_leading_zero,
+        unit_barcode_from_extra=data.barcode_from_extra,
+        extract_gtin=_extract_gtin,
+    )
+
+    pdf_bytes, split_payload, total_pages = await generate_aggregation_labels_pdf(
+        db,
+        org,
+        jobs,
+        start_number=data.start_number,
+        continuous_numbering=data.continuous_numbering,
+        split_files=data.split_files,
+        pages_per_file=data.pages_per_file,
+        save=data.save,
+        kitu_template_id=kitu_template.id,
+        unit_template_id=unit_template.id,
+        draw_label_fn=_draw_aggregation_label_page,
+    )
+
+    if split_payload is not None:
+        return JSONResponse(content=split_payload.model_dump(mode="json"))
+
+    if data.save:
+        await log_operation(
+            db,
+            operation_type=OperationLogType.LABEL_PRINTED,
+            status=OperationLogStatus.SUCCESS,
+            description=f"Последовательная печать: {total_pages} этикеток (КИТУ+вложения)",
+            codes_count=total_pages,
+            org_id=org.id if org else None,
+        )
+
+    inline_filename = f"aggregation_labels_{total_pages}pcs.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"inline; filename={inline_filename}"},
+    )
+
+
+async def _load_aggregation_template(
+    db: AsyncSession,
+    template_id: UUID,
+    *,
+    label: str,
+) -> LabelTemplate:
+    template = await db.get(LabelTemplate, template_id)
+    if template is None:
+        raise HTTPException(status_code=404, detail=f"Шаблон {label} не найден")
+    return template
 
 
 @router.post("/pdf/preview")

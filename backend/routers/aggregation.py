@@ -15,6 +15,9 @@ from schemas import (
     KituBatchGenerateRequest,
     KituBatchGenerateResponse,
     KituBatchItem,
+    KituUniquenessCheckRequest,
+    KituUniquenessCheckResponse,
+    KituUniquenessResultItem,
 )
 from services import aggregation_service
 from services.aggregation_service import (
@@ -22,6 +25,7 @@ from services.aggregation_service import (
     generate_kitu_code,
     normalize_kitu_gcp,
 )
+from services.suz_integration_service import check_kitu_uniqueness
 
 router = APIRouter(prefix="/aggregation", tags=["aggregation"])
 
@@ -41,9 +45,20 @@ async def create_document(
         raise HTTPException(status_code=400, detail="Список кодов пуст")
     if len(data.marking_codes) > 1000:
         raise HTTPException(status_code=400, detail="Максимум 1000 кодов в одной упаковке")
-    return await aggregation_service.create_aggregation_draft(
-        data, db, org_id=org.id if org else None
-    )
+    is_set = str(data.aggregation_type) == aggregation_service.AGGREGATION_TYPE_SET
+    if is_set:
+        if len(data.marking_codes) < 1:
+            raise HTTPException(status_code=400, detail="Для набора нужен хотя бы один код вложения")
+    elif len(data.marking_codes) < 1:
+        raise HTTPException(status_code=400, detail="Для агрегации КИТУ нужен хотя бы один код вложения")
+    try:
+        return await aggregation_service.create_aggregation_draft(
+            data, db, org_id=org.id if org else None
+        )
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
 
 
 @router.get("/", response_model=list[AggregationDocumentResponse])
@@ -87,6 +102,31 @@ async def generate_kitu_batch_endpoint(
         items=items,
         gcp=gcp_normalized,
         extension=payload.extension,
+    )
+
+
+@router.post("/check-kitu-uniqueness", response_model=KituUniquenessCheckResponse)
+async def check_kitu_uniqueness_endpoint(
+    payload: KituUniquenessCheckRequest,
+    _: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> KituUniquenessCheckResponse:
+    """Проверить уникальность КИТУ/SSCC в ЧЗ (True API /cises/info)."""
+    raw_results = await check_kitu_uniqueness(
+        payload.kitu_codes,
+        db=db,
+        product_group=payload.product_group,
+    )
+    items = [KituUniquenessResultItem(**item) for item in raw_results]
+    unique_count = sum(1 for item in items if item.status == "unique")
+    exists_count = sum(1 for item in items if item.status == "exists")
+    error_count = sum(1 for item in items if item.status == "error")
+    return KituUniquenessCheckResponse(
+        results=items,
+        total=len(items),
+        unique_count=unique_count,
+        exists_count=exists_count,
+        error_count=error_count,
     )
 
 

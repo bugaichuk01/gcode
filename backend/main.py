@@ -66,7 +66,7 @@ Authorization: Bearer {access_token}
 async def create_default_templates(db) -> None:
     """Создать шаблоны по умолчанию при первом запуске.
 
-    Размеры 58×40, 43×25, 80×50 должны совпадать с frontend LABEL_SIZE_PRESETS
+    Размеры 58×40, 43×25, 80×50, 40×20 должны совпадать с frontend LABEL_SIZE_PRESETS
     (frontend/src/labels/sizePresets.ts).
     """
     from sqlalchemy import select
@@ -205,9 +205,78 @@ async def create_default_templates(db) -> None:
                 ]
             },
         ),
+        LabelTemplate(
+            name="SSCC 40×20мм",
+            width_mm=40,
+            height_mm=20,
+            is_default=False,
+            org_id=None,
+            layout_data={
+                "elements": [
+                    {
+                        "type": "barcode_ean13",
+                        "x": 2,
+                        "y": 2,
+                        "width": 36,
+                        "height": 10,
+                    },
+                    {
+                        "type": "field",
+                        "x": 2,
+                        "y": 14,
+                        "field_key": "kitu_code",
+                        "font_size": 5,
+                        "max_width": 36,
+                    },
+                ]
+            },
+        ),
     ]
     for template in defaults:
         db.add(template)
+    await db.commit()
+
+
+async def ensure_sscc_default_template(db) -> None:
+    """Добавить шаблон SSCC 40×20, если его ещё нет (для существующих установок)."""
+    from sqlalchemy import select
+
+    from models import LabelTemplate
+
+    existing = await db.scalar(
+        select(LabelTemplate).where(LabelTemplate.name == "SSCC 40×20мм").limit(1)
+    )
+    if existing:
+        return
+
+    db.add(
+        LabelTemplate(
+            name="SSCC 40×20мм",
+            width_mm=40,
+            height_mm=20,
+            is_default=False,
+            org_id=None,
+            layout_data={
+                "elements": [
+                    {
+                        "type": "barcode_ean13",
+                        "x": 2,
+                        "y": 2,
+                        "width": 36,
+                        "height": 10,
+                    },
+                    {
+                        "type": "field",
+                        "x": 2,
+                        "y": 14,
+                        "field_key": "kitu_code",
+                        "font_size": 5,
+                        "max_width": 36,
+                    },
+                ]
+            },
+        )
+    )
     await db.commit()
 
 
@@ -218,6 +287,7 @@ async def lifespan(app: FastAPI):
 
         await create_admin_if_not_exists(db)
         await create_default_templates(db)
+        await ensure_sscc_default_template(db)
 
     task = asyncio.create_task(refresh_token_background())
     logger.info("Фоновый мониторинг токена СУЗ запущен")

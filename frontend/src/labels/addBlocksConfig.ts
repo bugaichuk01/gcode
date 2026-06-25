@@ -13,11 +13,12 @@ export type AddBlocksTab = (typeof ADD_BLOCKS_TAB_ORDER)[number];
 /** Вкладки, список блоков которых строится из field_catalog (filter by tab). */
 export const CATALOG_SOURCED_TABS: Partial<Record<AddBlocksTab, string>> = {
   "Поля этикетки": "Поля этикетки",
+  "Честный знак": "Честный знак",
   "Ещё": "Ещё",
 };
 
 /** Вкладки: примитивы из STATIC_ADD_BLOCK_ENTRIES + поля из каталога. */
-export const HYBRID_CATALOG_TABS = new Set<AddBlocksTab>(["Ещё"]);
+export const HYBRID_CATALOG_TABS = new Set<AddBlocksTab>(["Ещё", "Честный знак"]);
 
 export interface StaticAddBlockEntry {
   tab: AddBlocksTab;

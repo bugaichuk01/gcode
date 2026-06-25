@@ -65,6 +65,13 @@ FIELD_CATALOG: list[FieldDefinition] = [
         tab=TAB_HONEST_SIGN,
     ),
     FieldDefinition(
+        "kitu_code",
+        "SSCC / КИТУ",
+        ("print_context.kitu_code", "code.kitu"),
+        "460000000123456789",
+        tab=TAB_HONEST_SIGN,
+    ),
+    FieldDefinition(
         "size",
         "Размер",
         ("extra_fields.size", "product_card.size"),
@@ -187,7 +194,30 @@ FIELD_CATALOG: list[FieldDefinition] = [
         "1",
         tab=TAB_MORE,
     ),
+    FieldDefinition(
+        "package_number",
+        "Номер упаковки",
+        ("print_context.kitu_index",),
+        "1",
+        tab=TAB_MORE,
+    ),
+    FieldDefinition(
+        "labels_in_kitu",
+        "Номер этикеток в КИТУ",
+        ("print_context.labels_in_kitu",),
+        "1-10",
+        tab=TAB_MORE,
+    ),
 ]
+
+
+def format_labels_in_kitu_range(items_in_kitu: int | None) -> str:
+    """Диапазон номеров вложений на этикетке КИТУ: «1», «1-N» или пусто."""
+    if not items_in_kitu:
+        return ""
+    if items_in_kitu == 1:
+        return "1"
+    return f"1-{items_in_kitu}"
 
 
 @dataclass(frozen=True)
@@ -198,9 +228,16 @@ class PrintContext:
     label_number: int  # отображаемый номер = start_number + label_index
     total: int
     barcode_type: str = "ean13"  # ean13 | code128
-    barcode_column: str = "gtin"  # gtin | barcode | ключ поля каталога
+    barcode_column: str = "gtin"  # gtin | barcode | kitu_code | ключ поля каталога
     barcode_keep_leading_zero: bool = True
     barcode_from_extra: bool = False
+    kitu_code: str = ""
+    # Контекст упаковки (последовательная печать КИТУ + вложений)
+    kitu_index: int | None = None  # 1-based порядковый номер КИТУ в задании
+    kitu_total: int | None = None
+    items_in_kitu: int | None = None
+    item_number_in_kitu: int | None = None  # 1-based номер вложения внутри КИТУ
+    label_kind: str | None = None  # kitu | km
 
 
 @dataclass
@@ -260,6 +297,29 @@ def _resolve_source_ref(source_ref: str, ctx: FieldResolveContext) -> str:
 
     if source_ref == "code.cis_human":
         return get_short_cis(ctx.code) if ctx.code else ""
+
+    if source_ref == "code.kitu":
+        code = (ctx.code or "").strip()
+        if len(code) == 18 and code.isdigit():
+            return code
+        return ""
+
+    if source_ref == "print_context.kitu_code":
+        if ctx.print_context is None:
+            return ""
+        return (ctx.print_context.kitu_code or "").strip()
+
+    if source_ref == "print_context.kitu_index":
+        if ctx.print_context is None or ctx.print_context.kitu_index is None:
+            return ""
+        return str(ctx.print_context.kitu_index)
+
+    if source_ref == "print_context.labels_in_kitu":
+        if ctx.print_context is None:
+            return ""
+        if ctx.print_context.label_kind != "kitu":
+            return ""
+        return format_labels_in_kitu_range(ctx.print_context.items_in_kitu)
 
     if source_ref.startswith("extra_fields.extra."):
         json_key = source_ref[len("extra_fields.extra.") :]
@@ -338,6 +398,8 @@ def resolve_barcode_value(
         raw = (ctx.gtin or resolve_field("gtin", ctx)).strip()
     elif barcode_column == "barcode":
         raw = _resolve_source_ref("extra_fields.barcode", ctx).strip()
+    elif barcode_column == "kitu_code":
+        raw = resolve_field("kitu_code", ctx).strip()
     else:
         return None
 

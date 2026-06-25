@@ -23,6 +23,9 @@ from schemas import (
     EmissionOrderResponse,
     EmissionOrderStatusUpdateRequest,
     FetchCodesResponse,
+    IntroduceGoodsBodyPreview,
+    IntroduceGoodsBodyRequest,
+    IntroduceGoodsRequest,
     IntroduceOstBodyPreview,
     IntroduceOstBodyRequest,
     IntroduceOstRequest,
@@ -354,6 +357,88 @@ async def download_order_template() -> Response:
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": "attachment; filename=order_template.xlsx"},
     )
+
+
+@router.post("/introduce-goods-body", response_model=IntroduceGoodsBodyPreview)
+async def get_introduce_goods_body(
+    data: IntroduceGoodsBodyRequest,
+    _: User = Depends(get_current_user),
+    org: Organization | None = Depends(get_current_org),
+    db: AsyncSession = Depends(get_db_session),
+) -> IntroduceGoodsBodyPreview:
+    """Получить тело документа LP_INTRODUCE_GOODS для подписи."""
+    from services.introduce_goods_service import (
+        build_introduce_goods_document,
+        encode_introduce_goods_body,
+    )
+
+    if not data.marking_codes:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Список кодов пуст",
+        )
+    if not org or not org.inn:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Не указан ИНН организации в настройках",
+        )
+
+    try:
+        doc = await build_introduce_goods_document(
+            data.marking_codes,
+            db,
+            org_inn=org.inn,
+            production_date=data.production_date,
+            default_tnved_code=data.default_tnved_code,
+            fill_tnved_from_cards=data.fill_tnved_from_cards,
+            fill_certificate_from_cards=data.fill_certificate_from_cards,
+            org_id=org.id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from e
+
+    body_json, body_b64 = encode_introduce_goods_body(doc)
+    return IntroduceGoodsBodyPreview(body=body_json, body_b64=body_b64)
+
+
+@router.post("/introduce-goods")
+async def send_introduce_goods_endpoint(
+    data: IntroduceGoodsRequest,
+    _: User = Depends(get_current_user),
+    org: Organization | None = Depends(get_current_org),
+    db: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Отправить LP_INTRODUCE_GOODS — ввод в оборот (Производство РФ)."""
+    from services.introduce_goods_service import send_introduce_goods as _send
+
+    if not data.marking_codes:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Список кодов пуст",
+        )
+    if not org or not org.inn:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Не указан ИНН организации в настройках",
+        )
+
+    try:
+        return await _send(
+            data.marking_codes,
+            data.signature,
+            data.product_group,
+            db,
+            org_inn=org.inn,
+            production_date=data.production_date,
+            default_tnved_code=data.default_tnved_code,
+            fill_tnved_from_cards=data.fill_tnved_from_cards,
+            fill_certificate_from_cards=data.fill_certificate_from_cards,
+            org_id=org.id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from e
+    except RuntimeError as e:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
 
 
 @router.post("/introduce-ost-body", response_model=IntroduceOstBodyPreview)

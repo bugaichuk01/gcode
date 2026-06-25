@@ -524,6 +524,15 @@ class AggregationDocument(Base):
     product_group: Mapped[str] = mapped_column(String(64), nullable=False, default="perfumery")
     marking_codes: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     units_capacity: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    aggregation_type: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="AGGREGATION"
+    )
+    product_card_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("product_cards.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     status: Mapped[AggregationStatus] = mapped_column(
         Enum(
             AggregationStatus,

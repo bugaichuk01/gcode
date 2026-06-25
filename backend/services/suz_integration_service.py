@@ -1099,6 +1099,17 @@ def _resolve_true_api_base_url(settings: Settings | None = None) -> str:
     if not true_api_base:
         raise SuzIntegrationError("Не задан TRUE_API_BASE_URL в настройках")
     return true_api_base
+
+
+# Лимит батча для POST /cises/info: в emission-orders — 50 за запрос;
+# по доке True API допускается до 1000, но сохраняем 50 для совместимости с КМ.
+CIS_INFO_BATCH_SIZE = 50
+
+_CIS_NOT_FOUND_MESSAGES = frozenset({"КМ/КИ не найден", "КИ не найден"})
+
+
+def _is_cis_not_found(error_code: object, error_msg: str | None) -> bool:
+    return str(error_code) == "404" or (error_msg or "") in _CIS_NOT_FOUND_MESSAGES
 async def check_cis_status(
     cis: str,
     client_token: str | None = None,
@@ -1145,8 +1156,8 @@ async def check_cis_status(
 async def check_cis_statuses_batch(
     cises: list[str],
     db: AsyncSession | None = None,
-    *args,
-    **kwargs,
+    *,
+    pg: str | None = None,
 ) -> list[dict[str, Any]]:
     import json as json_lib
     settings = get_settings()
@@ -1167,9 +1178,11 @@ async def check_cis_statuses_batch(
         "Accept": "application/json",
     }
     body = json_lib.dumps(cises, ensure_ascii=True)
+    query_params = {"pg": pg} if pg else None
     logger.info(
-        "True API request: url=%s, codes_count=%d, first_code_repr=%s",
+        "True API request: url=%s, pg=%s, codes_count=%d, first_code_repr=%s",
         url,
+        pg,
         len(cises),
         repr(cises[0])[:80] if cises else "",
     )
@@ -1178,7 +1191,7 @@ async def check_cis_statuses_batch(
         method="POST",
         url=url,
         headers=headers,
-        params=None,
+        params=query_params,
         content=body.encode("utf-8"),
     )
     if response is None:
@@ -1209,7 +1222,7 @@ async def check_cis_statuses_batch(
                 cis = item.get("cisInfo", {}).get("cis", "") or (cises[i] if i < len(cises) else "")
                 error_msg = item.get("errorMessage")
                 error_code = item.get("errorCode")
-                if str(error_code) == "404" or error_msg == "КМ/КИ не найден":
+                if _is_cis_not_found(error_code, error_msg):
                     status = "not_found"
                 elif error_msg:
                     status = "error"
@@ -1239,7 +1252,7 @@ async def check_cis_statuses_batch(
                             method="POST",
                             url=url,
                             headers=headers,
-                            params=None,
+                            params=query_params,
                             content=body2.encode("utf-8"),
                         )
                         if response2 and response2.status_code == 200:
@@ -1253,7 +1266,7 @@ async def check_cis_statuses_batch(
                                         orig_cis = cises[i] if i < len(cises) else ""
                                         error_msg2 = item.get("errorMessage")
                                         error_code2 = item.get("errorCode")
-                                        if str(error_code2) == "404" or error_msg2 == "КМ/КИ не найден":
+                                        if _is_cis_not_found(error_code2, error_msg2):
                                             status2 = "not_found"
                                         elif error_msg2:
                                             status2 = "error"
@@ -1290,4 +1303,56 @@ async def check_cis_statuses_batch(
             return [{"cis": c, "status": "error", "error": err_text} for c in cises]
     except Exception as e:
         return [{"cis": c, "status": "error", "error": str(e)} for c in cises]
+    return results
+
+
+async def check_kitu_uniqueness(
+    kitu_codes: list[str],
+    *,
+    db: AsyncSession | None = None,
+    product_group: str,
+) -> list[dict[str, Any]]:
+    """
+    Проверить уникальность КИТУ/SSCC в ЧЗ через POST /cises/info.
+
+    unique — errorCode 404 / «КИ не найден»;
+    exists — в ответе есть cisInfo;
+    error — сетевая/токенная ошибка или иной errorCode.
+    """
+    pg = normalize_suz_product_group(product_group) or product_group.strip()
+    results: list[dict[str, Any]] = []
+    for offset in range(0, len(kitu_codes), CIS_INFO_BATCH_SIZE):
+        batch = kitu_codes[offset : offset + CIS_INFO_BATCH_SIZE]
+        batch_results = await check_cis_statuses_batch(batch, db=db, pg=pg)
+        for idx, raw in enumerate(batch_results):
+            kitu_code = batch[idx] if idx < len(batch) else str(raw.get("cis", ""))
+            status_raw = raw.get("status", "error")
+            if status_raw == "not_found":
+                uniqueness = "unique"
+                detail = raw.get("error") or "КИ не найден"
+            elif status_raw == "error":
+                uniqueness = "error"
+                detail = raw.get("error") or "Ошибка проверки"
+            else:
+                uniqueness = "exists"
+                gtin = raw.get("gtin")
+                detail = f"Статус в ЧЗ: {status_raw}"
+                if gtin:
+                    detail += f", GTIN: {gtin}"
+            results.append(
+                {
+                    "kitu_code": kitu_code,
+                    "status": uniqueness,
+                    "detail": detail,
+                }
+            )
+        if len(batch_results) < len(batch):
+            for missing in batch[len(batch_results) :]:
+                results.append(
+                    {
+                        "kitu_code": missing,
+                        "status": "error",
+                        "detail": "Нет ответа от ЧЗ для кода",
+                    }
+                )
     return results

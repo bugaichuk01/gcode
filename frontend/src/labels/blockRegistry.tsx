@@ -1034,7 +1034,11 @@ export const BLOCK_REGISTRY: Record<BlockType, BlockTypeDefinition> = {
       const valueText =
         el.field_key === "label_number"
           ? "1"
-          : (field?.example ?? `{${el.field_key ?? "?"}}`);
+          : el.field_key === "package_number"
+            ? "1"
+            : el.field_key === "labels_in_kitu"
+              ? "1-10"
+              : (field?.example ?? `{${el.field_key ?? "?"}}`);
       if (shouldShowLabel(el)) {
         const labelText = el.label?.text ?? `${field?.label ?? el.field_key ?? "?"}:`;
         return renderLabelValueCanvas(el, scale, labelText, valueText);
